@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain, shell } from 'electron';
+import { BrowserWindow, Menu, app, dialog, ipcMain, safeStorage, shell } from 'electron';
 import * as path from 'node:path';
 import { AppCore } from '../core/app';
 import type { NetworkConfig, Settings, UiEvent } from '../core/types';
@@ -14,6 +14,7 @@ function createWindow(): void {
     minHeight: 420,
     title: 'Onda IRC',
     backgroundColor: '#14171c',
+    icon: path.join(__dirname, '..', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -38,6 +39,13 @@ app.whenReady().then(() => {
     dataDir,
     downloadsDir: process.env.ONDA_DATA_DIR ? path.join(dataDir, 'descargas') : path.join(app.getPath('downloads'), 'Onda IRC'),
     version: `Onda IRC ${app.getVersion()}`,
+    // Las contraseñas guardadas se cifran con el almacén de claves del sistema cuando está disponible.
+    secrets: safeStorage.isEncryptionAvailable()
+      ? {
+          encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
+          decrypt: (cipher) => safeStorage.decryptString(Buffer.from(cipher, 'base64')),
+        }
+      : undefined,
   });
   core.on('ui', (ev: UiEvent) => win?.webContents.send('ui', ev));
 
@@ -56,14 +64,19 @@ app.whenReady().then(() => {
   h('scripts:list', () => core.listScripts());
   h('scripts:save', (name: string, source: string) => core.saveScript(String(name), String(source)));
   h('scripts:delete', (name: string) => core.deleteScript(String(name)));
+  h('menu:get', (sid: string, buffer: string, nick?: string) => core.scriptMenu(String(sid), String(buffer), nick ? String(nick) : undefined));
+  h('menu:run', (id: string, sid: string, buffer: string, nick?: string) =>
+    core.runScriptMenu(String(id), String(sid), String(buffer), nick ? String(nick) : undefined));
+  h('dialog:event', (name: string, event: string, id: number, value?: { text?: string; checked?: boolean; sel?: number }) =>
+    core.dialogEvent(name, event, id, value));
   h('logs:search', (q: string) => core.searchLogs(String(q)));
   h('dcc:accept', (id: string) => core.dccAccept(id));
   h('dcc:reject', (id: string) => core.dccReject(id));
   h('dcc:chat', (sid: string, nick: string) => core.dccChat(sid, nick));
-  h('dcc:send', async (sid: string, nick: string) => {
+  h('dcc:send', async (sid: string, nick: string, passive?: boolean) => {
     if (!win) return;
     const r = await dialog.showOpenDialog(win, { title: `Enviar archivo a ${nick}`, properties: ['openFile'] });
-    if (!r.canceled && r.filePaths[0]) await core.dccSend(sid, nick, r.filePaths[0]);
+    if (!r.canceled && r.filePaths[0]) await core.dccSend(sid, nick, r.filePaths[0], passive === true);
   });
   h('dcc:reveal', (id: string) => {
     const d = core.snapshot().dccs.find((x) => x.id === id);

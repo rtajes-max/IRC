@@ -1,6 +1,6 @@
 {
   "name": "onda-irc",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Cliente IRC de escritorio moderno con scripting compatible con mIRC",
   "private": true,
   "license": "MIT",
@@ -9,13 +9,47 @@
     "build": "node scripts/build.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dist": "npm run build && electron-builder --publish never",
+    "smoke": "node scripts/build.mjs && node dist/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
+  },
+  "author": "rtajes-max",
+  "build": {
+    "appId": "es.rogertp.ondairc",
+    "productName": "Onda IRC",
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.social-networking",
+      "identity": null
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Network"
+    }
   }
 }

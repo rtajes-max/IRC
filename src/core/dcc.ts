@@ -10,6 +10,8 @@ export interface DccOffer {
   ip: string;
   port: number;
   size: number;
+  /** DCC pasivo: el remitente no puede escuchar y pide que lo haga el receptor. */
+  token?: string;
 }
 
 export function ipToInt(ip: string): number {
@@ -22,14 +24,20 @@ export function intToIp(n: number): string {
 
 /** Interpreta los argumentos de un CTCP DCC, p. ej. `SEND "mi foto.png" 3232235777 5000 1234`. */
 export function parseDccOffer(args: string): DccOffer | null {
-  const m = /^(SEND|CHAT)\s+(?:"([^"]*)"|(\S+))\s+(\S+)\s+(\d+)(?:\s+(\d+))?/i.exec(args.trim());
+  const m = /^(SEND|CHAT)\s+(?:"([^"]*)"|(\S+))\s+(\S+)\s+(\d+)(?:\s+(\d+))?(?:\s+(\S+))?/i.exec(args.trim());
   if (!m) return null;
   const port = Number(m[5]);
-  if (port < 1 || port > 65535) return null; // DCC pasivo (puerto 0) no admitido
+  const type = m[1].toUpperCase() as DccOffer['type'];
+  const token = m[7];
+  if (port > 65535) return null;
+  // Puerto 0 = DCC pasivo: solo se admite para archivos y con su identificador.
+  if (port === 0 && (type !== 'SEND' || !token)) return null;
   const addr = m[4];
   const ip = /^\d+$/.test(addr) ? intToIp(Number(addr)) : addr;
   if (!net.isIP(ip)) return null;
-  return { type: m[1].toUpperCase() as DccOffer['type'], filename: safeFilename(m[2] ?? m[3] ?? ''), ip, port, size: Number(m[6] ?? 0) };
+  const offer: DccOffer = { type, filename: safeFilename(m[2] ?? m[3] ?? ''), ip, port, size: Number(m[6] ?? 0) };
+  if (token) offer.token = token;
+  return offer;
 }
 
 /** Elimina rutas y caracteres peligrosos del nombre de archivo ofrecido por el remitente. */
@@ -51,17 +59,65 @@ export class DccReceive extends EventEmitter {
   received = 0;
   path = '';
   private socket: net.Socket | null = null;
+  private server: net.Server | null = null;
   private finished = false;
 
   constructor(public offer: DccOffer, private destDir: string) {
     super();
   }
 
-  start(): void {
+  private get partPath(): string {
+    return path.join(this.destDir, this.offer.filename + '.part');
+  }
+
+  /** Bytes ya descargados en un intento anterior que se pueden aprovechar (0 si no hay nada que reanudar). */
+  resumePosition(): number {
+    try {
+      const size = fs.statSync(this.partPath).size;
+      return size > 0 && this.offer.size > 0 && size < this.offer.size ? size : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Conecta con el remitente. `from` > 0 continúa una descarga parcial desde esa posición. */
+  start(from = 0): void {
+    this.attach(net.connect({ host: this.offer.ip, port: this.offer.port }), from);
+  }
+
+  /**
+   * DCC pasivo: escucha en un puerto local y devuelve los argumentos del CTCP DCC con los que
+   * se responde al remitente para que sea él quien se conecte.
+   */
+  listenPassive(localIp: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer((sock) => {
+        server.close();
+        clearTimeout(timeout);
+        this.attach(sock);
+      });
+      this.server = server;
+      const timeout = setTimeout(() => {
+        server.close();
+        if (!this.finished) {
+          this.finished = true;
+          this.emit('error', new Error('el remitente no se conectó'));
+        }
+      }, 120000);
+      timeout.unref();
+      server.on('error', reject);
+      server.listen(0, () => {
+        const name = this.offer.filename.includes(' ') ? `"${this.offer.filename}"` : this.offer.filename;
+        resolve(`SEND ${name} ${ipToInt(localIp)} ${(server.address() as net.AddressInfo).port} ${this.offer.size} ${this.offer.token}`);
+      });
+    });
+  }
+
+  private attach(sock: net.Socket, from = 0): void {
     fs.mkdirSync(this.destDir, { recursive: true });
-    this.path = uniquePath(this.destDir, this.offer.filename);
-    const out = fs.createWriteStream(this.path);
-    const sock = net.connect({ host: this.offer.ip, port: this.offer.port });
+    // Se descarga en un archivo «.part»; solo al terminar recibe su nombre definitivo.
+    const out = fs.createWriteStream(this.partPath, { flags: from > 0 ? 'a' : 'w' });
+    this.received = from;
     this.socket = sock;
     sock.setTimeout(60000, () => sock.destroy(new Error('tiempo de espera agotado')));
     const finish = (err?: Error) => {
@@ -69,8 +125,15 @@ export class DccReceive extends EventEmitter {
       this.finished = true;
       out.end(() => {
         const complete = !err && (this.offer.size === 0 || this.received >= this.offer.size);
-        if (complete) this.emit('done', this.path);
-        else this.emit('error', err ?? new Error('transferencia incompleta'));
+        if (complete) {
+          try {
+            this.path = uniquePath(this.destDir, this.offer.filename);
+            fs.renameSync(this.partPath, this.path);
+            this.emit('done', this.path);
+          } catch (e) {
+            this.emit('error', e);
+          }
+        } else this.emit('error', err ?? new Error('transferencia incompleta (se podrá reanudar)'));
       });
       sock.destroy();
     };
@@ -88,6 +151,7 @@ export class DccReceive extends EventEmitter {
   }
 
   cancel(): void {
+    this.server?.close();
     this.socket?.destroy(new Error('cancelado'));
   }
 }
@@ -97,9 +161,68 @@ export class DccSend extends EventEmitter {
   size = 0;
   private server: net.Server | null = null;
   private finished = false;
+  private connected = false;
+  /** Puerto en el que se espera al destinatario (0 si no se está escuchando). */
+  port = 0;
+  private offset = 0;
+  private passiveTimer: NodeJS.Timeout | null = null;
 
   constructor(public filePath: string) {
     super();
+  }
+
+  private stream(sock: net.Socket): void {
+    const stream = fs.createReadStream(this.filePath, { start: this.offset });
+    this.sent = this.offset;
+    const finish = (err?: Error) => {
+      if (this.finished) return;
+      this.finished = true;
+      stream.destroy();
+      sock.destroy();
+      if (err || this.sent < this.size) this.emit('error', err ?? new Error('transferencia interrumpida'));
+      else this.emit('done');
+    };
+    stream.on('data', (chunk) => {
+      this.sent += chunk.length;
+      this.emit('progress', this.sent, this.size);
+    });
+    stream.on('error', (e) => finish(e));
+    sock.on('data', () => undefined); // acuses de recibo
+    sock.on('error', (e) => finish(e));
+    sock.on('close', () => finish());
+    stream.on('end', () => sock.end());
+    stream.pipe(sock, { end: false });
+  }
+
+  /**
+   * DCC pasivo: en vez de escuchar, se ofrece el archivo con puerto 0 y un identificador;
+   * el destinatario responde con su dirección y entonces se llama a `connectTo`.
+   */
+  passiveOffer(token: string): string {
+    this.size = fs.statSync(this.filePath).size;
+    const name = path.basename(this.filePath);
+    this.passiveTimer = setTimeout(() => {
+      if (!this.finished && !this.connected) {
+        this.finished = true;
+        this.emit('error', new Error('el destinatario no aceptó la transferencia'));
+      }
+    }, 120000);
+    this.passiveTimer.unref();
+    return `SEND ${name.includes(' ') ? `"${name}"` : name} 2130706433 0 ${this.size} ${token}`;
+  }
+
+  /** El destinatario pide reanudar desde `position`. Devuelve false si la posición no es válida. */
+  resumeFrom(position: number): boolean {
+    if (this.connected || this.finished || !Number.isInteger(position) || position <= 0 || position >= this.size) return false;
+    this.offset = position;
+    return true;
+  }
+
+  connectTo(ip: string, port: number): void {
+    if (this.finished || this.connected) return;
+    this.connected = true;
+    if (this.passiveTimer) clearTimeout(this.passiveTimer);
+    this.stream(net.connect({ host: ip, port }));
   }
 
   /** Abre un puerto de escucha y devuelve los argumentos del CTCP DCC que hay que enviar. */
@@ -109,25 +232,7 @@ export class DccSend extends EventEmitter {
       const server = net.createServer((sock) => {
         server.close();
         clearTimeout(timeout);
-        const stream = fs.createReadStream(this.filePath);
-        const finish = (err?: Error) => {
-          if (this.finished) return;
-          this.finished = true;
-          stream.destroy();
-          sock.destroy();
-          if (err || this.sent < this.size) this.emit('error', err ?? new Error('transferencia interrumpida'));
-          else this.emit('done');
-        };
-        stream.on('data', (chunk) => {
-          this.sent += chunk.length;
-          this.emit('progress', this.sent, this.size);
-        });
-        stream.on('error', (e) => finish(e));
-        sock.on('data', () => undefined); // acuses de recibo
-        sock.on('error', (e) => finish(e));
-        sock.on('close', () => finish());
-        stream.on('end', () => sock.end());
-        stream.pipe(sock, { end: false });
+        this.stream(sock);
       });
       this.server = server;
       const timeout = setTimeout(() => {
@@ -141,6 +246,7 @@ export class DccSend extends EventEmitter {
       server.on('error', reject);
       server.listen(port, () => {
         const addr = server.address() as net.AddressInfo;
+        this.port = addr.port;
         const name = path.basename(this.filePath);
         const quoted = name.includes(' ') ? `"${name}"` : name;
         resolve(`SEND ${quoted} ${ipToInt(localIp)} ${addr.port} ${this.size}`);
@@ -150,6 +256,8 @@ export class DccSend extends EventEmitter {
 
   cancel(): void {
     this.server?.close();
+    if (this.passiveTimer) clearTimeout(this.passiveTimer);
+    if (!this.connected && !this.finished) this.finished = true;
   }
 }
 
@@ -203,4 +311,11 @@ export class DccChat extends EventEmitter {
     this.server?.close();
     this.socket?.destroy();
   }
+}
+
+/** Interpreta `RESUME archivo puerto posición` y `ACCEPT archivo puerto posición`. */
+export function parseDccResume(args: string): { kind: 'RESUME' | 'ACCEPT'; port: number; position: number } | null {
+  const m = /^(RESUME|ACCEPT)\s+(?:"[^"]*"|\S+)\s+(\d+)\s+(\d+)/i.exec(args.trim());
+  if (!m) return null;
+  return { kind: m[1].toUpperCase() as 'RESUME' | 'ACCEPT', port: Number(m[2]), position: Number(m[3]) };
 }

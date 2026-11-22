@@ -13,6 +13,7 @@
     <button id="btn-connect" class="primary">Conectar</button>
     <button id="btn-scripts">Scripts</button>
     <button id="btn-dcc">Transferencias <span id="dcc-badge" class="badge" hidden></span></button>
+    <button id="btn-list">Canales</button>
     <button id="btn-logs">Registros</button>
     <span class="spacer"></span>
     <button id="btn-settings">Ajustes</button>
@@ -21,6 +22,7 @@
     <nav id="tree" aria-label="Redes y canales"></nav>
     <main id="chat">
       <div id="topic"></div>
+      <div id="find" hidden><input id="find-input" placeholder="Buscar en esta conversación" aria-label="Buscar en esta conversación"><span id="find-count"></span><button id="find-close" type="button" aria-label="Cerrar búsqueda">×</button></div>
       <div id="log" role="log" aria-live="polite"></div>
       <div id="typing"></div>
       <form id="input-form">
@@ -31,6 +33,7 @@
     <aside id="nicks" aria-label="Usuarios del canal"></aside>
   </div>
   <div id="context-menu" hidden></div>
+  <div id="script-dialogs"></div>
 
   <dialog id="dlg-connect">
     <form method="dialog" id="connect-form">
@@ -38,7 +41,7 @@
       <div id="saved-networks"></div>
       <div class="grid">
         <label>Nombre <input name="name" placeholder="Libera.Chat"></label>
-        <label>Servidor <input name="host" required placeholder="irc.libera.chat"></label>
+        <label>Servidor <input name="host" required placeholder="irc.rogertp.es"></label>
         <label>Puerto <input name="port" type="number" min="1" max="65535" value="6697" required></label>
         <label class="check"><input name="tls" type="checkbox" checked> Conexión cifrada (TLS)</label>
         <label>Nick <input name="nick" required></label>
@@ -49,8 +52,9 @@
         <label class="check"><input name="allowInvalidCert" type="checkbox"> Aceptar certificados no válidos</label>
         <label class="check"><input name="save" type="checkbox" checked> Guardar esta red</label>
         <label class="check"><input name="autoconnect" type="checkbox"> Conectar al iniciar</label>
+        <label class="full">Comandos al conectar (uno por línea)<textarea name="perform" rows="2" placeholder="/mode $me +x" spellcheck="false"></textarea></label>
       </div>
-      <p class="hint">Las contraseñas de las redes guardadas se almacenan sin cifrar en este equipo.</p>
+      <p class="hint">Las contraseñas de las redes guardadas se cifran con el almacén de claves del sistema cuando está disponible.</p>
       <menu>
         <button type="button" value="cancel" class="close">Cancelar</button>
         <button type="submit" class="primary">Conectar</button>
@@ -82,6 +86,14 @@
   <dialog id="dlg-dcc" class="wide">
     <h2>Transferencias y chats DCC</h2>
     <div id="dcc-list"></div>
+    <menu><button class="close">Cerrar</button></menu>
+  </dialog>
+
+  <dialog id="dlg-list" class="wide">
+    <h2>Canales de la red</h2>
+    <form id="list-form"><input id="list-filter" placeholder="Filtrar por nombre o tema" aria-label="Filtrar canales"><button type="button" id="list-refresh">Actualizar</button></form>
+    <div id="list-status" class="hint"></div>
+    <div id="list-results"></div>
     <menu><button class="close">Cerrar</button></menu>
   </dialog>
 

@@ -1,4 +1,7 @@
 /** Tipos compartidos entre el núcleo, el proceso principal y la interfaz. */
+import type { DialogView } from './msl/engine';
+
+export type { DialogControlView, DialogView } from './msl/engine';
 
 export const STATUS = '*';
 export const LOCAL = 'local';
@@ -17,6 +20,8 @@ export interface NetworkConfig {
   autojoin?: string[];
   allowInvalidCert?: boolean;
   autoconnect?: boolean;
+  /** Comandos que se ejecutan al conectar (uno por línea), como el «Perform» de mIRC. */
+  perform?: string[];
 }
 
 export interface Settings {
@@ -30,6 +35,10 @@ export interface Settings {
   logging: boolean;
   notifications: boolean;
   sendTyping: boolean;
+  /** Nicks o máscaras (nick!usuario@host, con comodines) cuyos mensajes no se muestran. */
+  ignore: string[];
+  /** Nicks de los que se avisa cuando entran o salen de la red. */
+  notify: string[];
 }
 
 export type LineKind =
@@ -48,7 +57,7 @@ export interface Line {
   msgid?: string;
 }
 
-export type BufferType = 'status' | 'channel' | 'query' | 'dcc';
+export type BufferType = 'status' | 'channel' | 'query' | 'dcc' | 'custom';
 
 export interface NickEntry {
   nick: string;
@@ -76,6 +85,12 @@ export interface DccInfo {
   path?: string;
 }
 
+export interface ChannelListEntry {
+  name: string;
+  users: number;
+  topic: string;
+}
+
 export type UiEvent =
   | ({ type: 'session' } & SessionInfo)
   | { type: 'session:remove'; sid: string }
@@ -89,6 +104,8 @@ export type UiEvent =
   | { type: 'typing'; sid: string; buffer: string; nick: string; state: string }
   | { type: 'react'; sid: string; buffer: string; nick: string; emoji: string; msgid: string }
   | { type: 'dcc'; dcc: DccInfo }
+  | { type: 'dialog'; name: string; view: DialogView | null }
+  | { type: 'chanlist'; sid: string; channels: ChannelListEntry[] }
   | { type: 'scripts' }
   | { type: 'settings'; settings: Settings };
 
@@ -97,6 +114,10 @@ export interface Snapshot {
   settings: Settings;
   networks: NetworkConfig[];
   dccs: DccInfo[];
+  /** Ventanas personalizadas creadas por scripts (/window @nombre). */
+  windows: string[];
+  /** Diálogos de scripts abiertos. */
+  dialogs: DialogView[];
 }
 
 export interface ScriptInfo {

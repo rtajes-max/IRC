@@ -6,6 +6,8 @@
  * El texto que llega de la red nunca se vuelve a evaluar (evita la inyección clásica de mIRC).
  */
 import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as tls from 'node:tls';
 import * as path from 'node:path';
 import { stripFormatting } from '../irc/formatting';
 import { ircLower } from '../irc/message';
@@ -21,6 +23,13 @@ export interface MslContext {
   numeric?: string;
   knick?: string;
   newnick?: string;
+  sockname?: string;
+  sockbr?: number;
+  sockerr?: number;
+  ulevel?: string;
+  dname?: string;
+  devent?: string;
+  did?: string;
   params: string[];
   locals: Map<string, string>;
   aliasStack: string[];
@@ -40,6 +49,8 @@ export interface MslHost {
   nicks(ctx: MslContext, chan: string): { nick: string; prefix: string }[];
   /** Carpeta a la que se limitan /write, $read, etc. */
   dataDir: string;
+  /** Un diálogo de script se ha abierto, ha cambiado (vista nueva) o se ha cerrado (null). */
+  dialogChanged?(name: string, view: DialogView | null): void;
 }
 
 type Stmt =
@@ -69,7 +80,69 @@ export interface Script {
   source: string;
   aliases: Map<string, AliasDef>;
   events: EventDef[];
+  menus: MenuDef[];
+  dialogs: Map<string, DialogDef>;
   warnings: string[];
+}
+
+export type DialogControlType = 'text' | 'edit' | 'button' | 'check' | 'radio' | 'list' | 'combo' | 'box' | 'tab';
+
+interface DialogControlDef {
+  type: DialogControlType;
+  id: number;
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  styles: string[];
+}
+
+interface DialogDef {
+  name: string;
+  title: string;
+  w: number;
+  h: number;
+  dbu: boolean;
+  controls: DialogControlDef[];
+}
+
+/** Estado de un control de diálogo, tal como lo ve la interfaz. */
+export interface DialogControlView extends DialogControlDef {
+  lines: string[];
+  sel: number;
+  checked: boolean;
+  enabled: boolean;
+  visible: boolean;
+}
+
+export interface DialogView {
+  name: string;
+  title: string;
+  w: number;
+  h: number;
+  dbu: boolean;
+  controls: DialogControlView[];
+}
+
+interface MenuItemDef {
+  depth: number;
+  label: string;
+  separator: boolean;
+  body: Stmt[] | null;
+}
+
+interface MenuDef {
+  types: string[];
+  items: MenuItemDef[];
+}
+
+/** Elemento de un popup ya evaluado, listo para mostrarse. */
+export interface MenuEntry {
+  label: string;
+  id?: string;
+  separator?: boolean;
+  children?: MenuEntry[];
 }
 
 class ReturnSignal {
@@ -78,9 +151,28 @@ class ReturnSignal {
 class HaltSignal {
   constructor(public haltdef = false) {}
 }
+class GotoSignal {
+  constructor(public label: string) {}
+}
 class BreakSignal {}
 class ContinueSignal {}
 export class MslError extends Error {}
+
+function errText(e: unknown): string {
+  if (e instanceof GotoSignal) return `no existe la etiqueta :${e.label}`;
+  return e instanceof Error ? e.message : String(e);
+}
+
+const PH_OPEN = '\uE000';
+const PH_CLOSE = '\uE001';
+
+interface ScriptSocket {
+  name: string;
+  socket: net.Socket;
+  buf: Buffer;
+  cid: string | null;
+  open: boolean;
+}
 
 const JOIN = Symbol('join');
 type Tok = string | typeof JOIN;
@@ -88,7 +180,7 @@ type Tok = string | typeof JOIN;
 const TWO_FIELD_EVENTS = new Set(['TEXT', 'ACTION', 'NOTICE', 'CTCP', 'CHAT']);
 const ONE_FIELD_EVENTS = new Set([
   'JOIN', 'PART', 'KICK', 'TOPIC', 'MODE', 'RAWMODE', 'OP', 'DEOP', 'VOICE', 'DEVOICE', 'BAN', 'UNBAN',
-  'INPUT', 'OPEN', 'CLOSE', 'INVITE', 'RAW',
+  'INPUT', 'OPEN', 'CLOSE', 'INVITE', 'RAW', 'SOCKOPEN', 'SOCKREAD', 'SOCKCLOSE',
 ]);
 
 const MAX_LOOP = 200000;
@@ -342,8 +434,81 @@ class BodyParser {
   }
 }
 
+const DIALOG_CONTROLS = new Set(['text', 'edit', 'button', 'check', 'radio', 'list', 'combo', 'box', 'tab']);
+
+/** Tabla de un diálogo: `title`, `size`, `option` y los controles (`text "x", id, x y w h, estilos`). */
+function parseDialog(name: string, inner: string, warnings: string[]): DialogDef {
+  const def: DialogDef = { name, title: name, w: 200, h: 120, dbu: false, controls: [] };
+  for (const raw of inner.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const kw = (/^\S+/.exec(line)?.[0] ?? '').toLowerCase();
+    const rest = line.slice(kw.length).trim();
+    if (kw === 'title') def.title = rest.replace(/^"(.*)"$/, '$1');
+    else if (kw === 'size') {
+      const n = rest.split(/\s+/).map(Number);
+      def.w = n[2] > 0 ? n[2] : def.w;
+      def.h = n[3] > 0 ? n[3] : def.h;
+    } else if (kw === 'option') def.dbu = /\bdbu\b/i.test(rest);
+    else if (DIALOG_CONTROLS.has(kw)) {
+      // El texto entre comillas es opcional (list y combo no lo llevan).
+      const tm = /^"((?:[^"]|"")*)"\s*,\s*/.exec(rest);
+      const parts = (tm ? rest.slice(tm[0].length) : rest).split(',').map((x) => x.trim());
+      let pos = (parts[1] ?? '').split(/\s+/).map(Number);
+      const id = Number(parts[0]);
+      // Las pestañas adicionales (`tab "Título", id`) no llevan coordenadas: comparten las de la primera.
+      if (kw === 'tab' && (pos.length < 4 || pos.some((v) => !Number.isFinite(v)))) pos = [0, 0, 0, 0];
+      if (!Number.isFinite(id) || pos.length < 4 || pos.some((v) => !Number.isFinite(v))) {
+        warnings.push(`Control de diálogo mal formado en "${name}": ${line.slice(0, 50)}`);
+        continue;
+      }
+      def.controls.push({
+        type: kw as DialogControlType, id, text: tm ? tm[1] : '', x: pos[0], y: pos[1], w: pos[2], h: pos[3],
+        styles: (parts[2] ?? '').toLowerCase().split(/\s+/).filter(Boolean),
+      });
+    } else warnings.push(`Elemento de diálogo no admitido en "${name}": ${kw}`);
+  }
+  return def;
+}
+
+/** Líneas de un popup: `Etiqueta:comando`, `.Subelemento:comando` (los puntos indican nivel) y `-` como separador. */
+function parseMenuItems(inner: string): MenuItemDef[] {
+  const items: MenuItemDef[] = [];
+  const lines = inner.split('\n');
+  for (let n = 0; n < lines.length; n++) {
+    let line = lines[n].trim();
+    if (!line) continue;
+    const dots = /^\.*/.exec(line)![0].length;
+    line = line.slice(dots).trim();
+    if (line === '-') {
+      items.push({ depth: dots, label: '', separator: true, body: null });
+      continue;
+    }
+    let depth = 0;
+    let colon = -1;
+    for (let k = 0; k < line.length; k++) {
+      if (line[k] === '(') depth++;
+      else if (line[k] === ')') depth--;
+      else if (line[k] === ':' && depth <= 0) {
+        colon = k;
+        break;
+      }
+    }
+    if (colon === -1) {
+      items.push({ depth: dots, label: line, separator: false, body: null });
+      continue;
+    }
+    let cmd = line.slice(colon + 1);
+    const balance = (t: string) => (t.match(/\{/g)?.length ?? 0) - (t.match(/\}/g)?.length ?? 0);
+    while (balance(cmd) > 0 && n + 1 < lines.length) cmd += '\n' + lines[++n];
+    const body = new BodyParser(cmd).parseBlock();
+    items.push({ depth: dots, label: line.slice(0, colon).trim(), separator: false, body: body.length ? body : null });
+  }
+  return items;
+}
+
 export function parseScript(name: string, source: string): Script {
-  const script: Script = { name, source, aliases: new Map(), events: [], warnings: [] };
+  const script: Script = { name, source, aliases: new Map(), events: [], menus: [], dialogs: new Map(), warnings: [] };
   // Quitar comentarios: bloques /* */ y líneas que empiezan por ;
   const src = source
     .replace(/\r/g, '')
@@ -430,6 +595,11 @@ export function parseScript(name: string, source: string): Script {
           match = readField() ?? '*';
           target = readField() ?? '*';
         } else if (ONE_FIELD_EVENTS.has(event)) target = readField() ?? '*';
+        else if (event === 'DIALOG') {
+          // on *:DIALOG:nombre:evento:ids:
+          target = readField() ?? '*';
+          match = `${readField() ?? '*'}:${readField() ?? '*'}`;
+        }
       } else if (kw === 'ctcp') {
         event = 'CTCP';
         match = readField() ?? '*';
@@ -446,9 +616,34 @@ export function parseScript(name: string, source: string): Script {
       const onlyMe = /^me:?/i.test(lvl);
       const notMe = lvl.startsWith('!');
       script.events.push({ event, level: lvl, pre, onlyMe, notMe, match: match.trim(), target: target.trim(), body: readBody() });
-    } else if (kw === 'menu' || kw === 'dialog') {
-      script.warnings.push(`"${kw}" todavía no está admitido; se ignora`);
-      skipBlockOrLine();
+    } else if (kw === 'menu') {
+      i += m[0].length;
+      const brace = src.indexOf('{', i);
+      const eol = src.indexOf('\n', i);
+      if (brace === -1 || (eol !== -1 && brace > eol)) {
+        script.warnings.push('Definición "menu" mal formada');
+        skipBlockOrLine();
+        continue;
+      }
+      const types = src.slice(i, brace).split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+      const end = findClose(src, brace, '{', '}');
+      const inner = src.slice(brace + 1, end === -1 ? src.length : end);
+      i = end === -1 ? src.length : end + 1;
+      script.menus.push({ types, items: parseMenuItems(inner) });
+    } else if (kw === 'dialog') {
+      i += m[0].length;
+      const brace = src.indexOf('{', i);
+      const eol = src.indexOf('\n', i);
+      if (brace === -1 || (eol !== -1 && brace > eol)) {
+        script.warnings.push('Definición "dialog" mal formada');
+        skipBlockOrLine();
+        continue;
+      }
+      const dname = src.slice(i, brace).replace(/^-\w+\s+/, '').trim();
+      const end = findClose(src, brace, '{', '}');
+      const inner = src.slice(brace + 1, end === -1 ? src.length : end);
+      i = end === -1 ? src.length : end + 1;
+      if (dname) script.dialogs.set(dname.toLowerCase(), parseDialog(dname, inner, script.warnings));
     } else if (kw.startsWith('#')) {
       // #grupo on/off … #grupo end: se tratan como siempre activos
       const eol = src.indexOf('\n', i);
@@ -484,6 +679,13 @@ export class MslEngine {
   vars = new Map<string, string>();
   hashes = new Map<string, Map<string, string>>();
   timers = new Map<string, Timer>();
+  socks = new Map<string, ScriptSocket>();
+  /** Lista de usuarios con nivel de acceso (/auser): máscara o nick → niveles. */
+  users: { mask: string; levels: string[] }[] = [];
+  onUsersChanged: (() => void) | null = null;
+  /** Diálogos abiertos, por nombre en minúsculas. */
+  dialogs = new Map<string, DialogView>();
+  private placeholders: string[] = [];
   onVarsChanged: (() => void) | null = null;
   private depth = 0;
   private loopBudget = MAX_LOOP;
@@ -503,6 +705,71 @@ export class MslEngine {
   dispose(): void {
     for (const t of this.timers.values()) clearInterval(t.handle);
     this.timers.clear();
+    this.dialogs.clear();
+    for (const sk of this.socks.values()) sk.socket.destroy();
+    this.socks.clear();
+  }
+
+  /**
+   * Popups definidos por los scripts para un tipo de ventana (channel, nicklist, query, status, menubar).
+   * Las etiquetas se evalúan al abrir el menú; una etiqueta vacía oculta el elemento, como en mIRC.
+   */
+  menu(type: string, ctx: MslContext): MenuEntry[] {
+    const root: MenuEntry[] = [];
+    for (const script of this.scripts.values()) {
+      script.menus.forEach((def, mi) => {
+        if (!def.types.includes(type)) return;
+        const stack: { depth: number; list: MenuEntry[] }[] = [{ depth: -1, list: root }];
+        let hiddenDepth = Infinity;
+        def.items.forEach((item, ii) => {
+          if (item.depth > hiddenDepth) return;
+          hiddenDepth = Infinity;
+          while (stack.length > 1 && stack[stack.length - 1].depth >= item.depth) stack.pop();
+          const list = stack[stack.length - 1].list;
+          if (item.separator) {
+            if (list.length && !list[list.length - 1].separator) list.push({ label: '', separator: true });
+            return;
+          }
+          let label = '';
+          try {
+            label = this.evalText(item.label, newContext({ ...ctx, locals: new Map() }));
+          } catch {
+            label = '';
+          }
+          if (!label) {
+            hiddenDepth = item.depth;
+            return;
+          }
+          const entry: MenuEntry = { label };
+          if (item.body) entry.id = `${script.name}\u0000${mi}\u0000${ii}`;
+          else entry.children = [];
+          list.push(entry);
+          if (entry.children) stack.push({ depth: item.depth, list: entry.children });
+        });
+      });
+    }
+    const clean = (list: MenuEntry[]): MenuEntry[] =>
+      list
+        .map((e) => (e.children ? { ...e, children: clean(e.children) } : e))
+        .filter((e) => e.separator || e.id || (e.children && e.children.length))
+        .filter((e, k, arr) => !(e.separator && (k === arr.length - 1 || k === 0)));
+    return clean(root);
+  }
+
+  /** Ejecuta el comando de un elemento de popup devuelto por `menu()`. */
+  runMenu(id: string, ctx: MslContext): boolean {
+    const [name, mi, ii] = id.split('\u0000');
+    const item = this.scripts.get(name)?.menus[Number(mi)]?.items[Number(ii)];
+    if (!item?.body) return false;
+    this.loopBudget = MAX_LOOP;
+    try {
+      this.runStmts(item.body, ctx);
+    } catch (e) {
+      if (!(e instanceof HaltSignal || e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal)) {
+        this.host.echo(`* Error de script (menú): ${errText(e)}`, null, ctx, 's');
+      }
+    }
+    return true;
   }
 
   findAlias(name: string): AliasDef | undefined {
@@ -529,7 +796,7 @@ export class MslEngine {
     } catch (e) {
       if (e instanceof HaltSignal) return { halted: true };
       if (e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal) return { halted: false };
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       this.host.echo(`* Error de script: ${msg}`, null, ctx, 's');
       return { halted: true, error: msg };
     }
@@ -548,7 +815,9 @@ export class MslEngine {
         if (def.event !== event || def.pre !== pre) continue;
         if (def.onlyMe && !init.isMe) continue;
         if (def.notMe && init.isMe) continue;
-        const ctx = newContext({ ...init, event, params: text ? text.split(' ').filter(Boolean) : [] });
+        const ulevel = this.levelMatch(def.level, init.nick ?? '', init.address ?? '');
+        if (ulevel === null) continue;
+        const ctx = newContext({ ...init, event, ulevel, params: text ? text.split(' ').filter(Boolean) : [] });
         if (!this.matchTarget(def, event, init, ctx)) continue;
         if (TWO_FIELD_EVENTS.has(event) || event === 'RAW') {
           let pat = def.match;
@@ -562,7 +831,7 @@ export class MslEngine {
         } catch (e) {
           if (e instanceof HaltSignal) haltdef = true;
           else if (!(e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal)) {
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = errText(e);
             this.host.echo(`* Error en ${script.name} (on ${event}): ${msg}`, null, ctx, 's');
           }
         }
@@ -574,8 +843,20 @@ export class MslEngine {
 
   private matchTarget(def: EventDef, event: string, init: Partial<MslContext>, ctx: MslContext): boolean {
     if (event === 'RAW') return def.target === '*' || def.target === init.numeric || Number(def.target) === Number(init.numeric);
+    if (event === 'DIALOG') {
+      const [evs, ids] = def.match.split(':');
+      if (!wildMatch(def.target.trim() || '*', init.dname ?? '')) return false;
+      if (evs.trim() !== '*' && !evs.toLowerCase().split(',').map((x) => x.trim()).includes(init.devent ?? '')) return false;
+      if (ids.trim() === '*') return true;
+      const id = Number(init.did);
+      return ids.split(',').some((r) => {
+        const m = /^\s*(\d+)(?:-(\d+))?\s*$/.exec(r);
+        return !!m && id >= Number(m[1]) && id <= Number(m[2] ?? m[1]);
+      });
+    }
     if (!TWO_FIELD_EVENTS.has(event) && !ONE_FIELD_EVENTS.has(event)) return true;
     const t = def.target;
+    if (event.startsWith('SOCK')) return wildMatch(t || '*', init.sockname ?? '');
     if (t === '*' || t === '') return true;
     const chan = init.chan ?? '';
     if (t === '#') return !!chan;
@@ -601,6 +882,7 @@ export class MslEngine {
       return '';
     } catch (e) {
       if (e instanceof ReturnSignal) return e.value;
+      if (e instanceof GotoSignal) throw new MslError(errText(e));
       throw e;
     } finally {
       this.depth--;
@@ -610,28 +892,40 @@ export class MslEngine {
   // --------------------------------------------------------- ejecución
 
   private runStmts(stmts: Stmt[], ctx: MslContext): void {
-    for (const s of stmts) {
-      if (s.t === 'cmd') this.execCommand(s.text, ctx, true);
-      else if (s.t === 'if') {
-        let done = false;
-        for (const b of s.branches) {
-          if (this.evalCond(b.cond, ctx)) {
-            this.runStmts(b.body, ctx);
-            done = true;
-            break;
-          }
+    for (let idx = 0; idx < stmts.length; idx++) {
+      try {
+        this.runStmt(stmts[idx], ctx);
+      } catch (e) {
+        if (!(e instanceof GotoSignal)) throw e;
+        // goto: se busca la etiqueta `:nombre` en este bloque; si no está, se propaga al bloque exterior.
+        const want = ':' + e.label.toLowerCase();
+        const at = stmts.findIndex((st) => st.t === 'cmd' && st.text.trim().toLowerCase() === want);
+        if (at === -1) throw e;
+        if (--this.loopBudget <= 0) throw new MslError('demasiados saltos con goto (posible bucle infinito)');
+        idx = at;
+      }
+    }
+  }
+
+  private runStmt(s: Stmt, ctx: MslContext): void {
+    if (s.t === 'cmd') this.execCommand(s.text, ctx, true);
+    else if (s.t === 'if') {
+      for (const b of s.branches) {
+        if (this.evalCond(b.cond, ctx)) {
+          this.runStmts(b.body, ctx);
+          return;
         }
-        if (!done && s.otherwise) this.runStmts(s.otherwise, ctx);
-      } else {
-        while (this.evalCond(s.cond, ctx)) {
-          if (--this.loopBudget <= 0) throw new MslError('bucle while demasiado largo (posible bucle infinito)');
-          try {
-            this.runStmts(s.body, ctx);
-          } catch (e) {
-            if (e instanceof BreakSignal) break;
-            if (e instanceof ContinueSignal) continue;
-            throw e;
-          }
+      }
+      if (s.otherwise) this.runStmts(s.otherwise, ctx);
+    } else {
+      while (this.evalCond(s.cond, ctx)) {
+        if (--this.loopBudget <= 0) throw new MslError('bucle while demasiado largo (posible bucle infinito)');
+        try {
+          this.runStmts(s.body, ctx);
+        } catch (e) {
+          if (e instanceof BreakSignal) break;
+          if (e instanceof ContinueSignal) continue;
+          throw e;
         }
       }
     }
@@ -639,7 +933,8 @@ export class MslEngine {
 
   private execCommand(textIn: string, ctx: MslContext, evaluate: boolean): void {
     let text = textIn.trim().replace(/^\/+/, '');
-    if (!text || text.startsWith(':')) return; // etiquetas de goto: no admitidas
+    if (!text || text.startsWith(':')) return; // etiqueta de goto
+    if (evaluate && text.includes('[ ')) text = this.resolveBrackets(text, ctx);
     let noAlias = false;
     for (;;) {
       if (text.startsWith('.') && text.length > 1) text = text.slice(1);
@@ -676,7 +971,7 @@ export class MslEngine {
           if (!m) continue;
           const val = this.arith(ev(m[2]));
           if (global) this.setGlobal(m[1], val);
-          else ctx.locals.set(m[1].toLowerCase(), val);
+          else ctx.locals.set(this.expand(m[1]).toLowerCase(), val);
         }
         return;
       }
@@ -685,7 +980,7 @@ export class MslEngine {
         if (!m) return;
         const { name: vname, value } = this.dynName(m[3], m[4], ctx, evaluate);
         const val = this.arith(ev(value));
-        if (m[1]?.includes('l')) ctx.locals.set(vname.toLowerCase(), val);
+        if (m[1]?.includes('l')) ctx.locals.set(this.expand(vname).toLowerCase(), val);
         else this.setGlobal(vname, val);
         const unsetSecs = m[1]?.includes('u') && m[2] ? Number(m[2]) : 0;
         if (unsetSecs > 0) setTimeout(() => this.unsetGlobal(vname), unsetSecs * 1000).unref();
@@ -722,7 +1017,26 @@ export class MslEngine {
       case 'continue':
         throw new ContinueSignal();
       case 'goto':
-        throw new MslError('goto no está admitido; usa while o if');
+        throw new GotoSignal(ev(rest).replace(/^:/, ''));
+      case 'sockread': {
+        const m = /^(?:-(\w+)\s+)?%(\S+)/.exec(rest);
+        const sk = this.socks.get((ctx.sockname ?? '').toLowerCase());
+        ctx.sockbr = 0;
+        if (!m || !sk) return;
+        let end = sk.buf.indexOf(0x0a);
+        let line: Buffer;
+        if (end === -1) {
+          if (!m[1]?.includes('f') || !sk.buf.length) return;
+          line = sk.buf;
+          sk.buf = Buffer.alloc(0);
+        } else {
+          line = sk.buf.subarray(0, end);
+          sk.buf = sk.buf.subarray(end + 1);
+        }
+        ctx.sockbr = line.length + (end === -1 ? 0 : 1);
+        this.setVar(m[2], line.toString('utf8').replace(/\r$/, ''), ctx, false);
+        return;
+      }
       case 'noop':
         ev(rest);
         return;
@@ -746,7 +1060,7 @@ export class MslEngine {
       while (toks.length && /^-[A-Za-z]+$/.test(toks[0])) flags += toks.shift()!.slice(1);
       let body = ev(toks.join(' '));
       let target: string | null = null;
-      const first = /^([#&]\S*) (.+)$/s.exec(body);
+      const first = /^([#&@]\S*) (.+)$/s.exec(body);
       if (!/[as]/.test(flags) && first) {
         target = first[1];
         body = first[2];
@@ -766,6 +1080,103 @@ export class MslEngine {
     }
 
     switch (name) {
+      case 'auser': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)/.exec(args);
+        if (!m) throw new MslError('uso: /auser [-a] niveles nick|máscara');
+        const levels = m[2].split(',').filter(Boolean);
+        const u = this.users.find((x) => x.mask.toLowerCase() === m[3].toLowerCase());
+        if (u) u.levels = m[1]?.includes('a') ? [...new Set([...u.levels, ...levels])] : levels;
+        else this.users.push({ mask: m[3], levels });
+        this.onUsersChanged?.();
+        return;
+      }
+      case 'ruser':
+      case 'rlevel': {
+        const t = args.split(' ').filter((x) => x && !x.startsWith('-'));
+        if (!t.length) return;
+        if (name === 'rlevel') this.users = this.users.filter((u) => !u.levels.some((l) => l.toLowerCase() === t[0].toLowerCase()));
+        else {
+          const mask = t[t.length - 1].toLowerCase();
+          this.users = this.users.filter((u) => u.mask.toLowerCase() !== mask);
+        }
+        this.onUsersChanged?.();
+        return;
+      }
+      case 'dialog': {
+        const m = /^-(\w+)\s+(\S+)\s*(.*)$/s.exec(args);
+        if (!m) throw new MslError('uso: /dialog -m nombre tabla  ·  /dialog -x nombre');
+        const key = m[2].toLowerCase();
+        if (m[1].includes('x')) this.dialogClose(key, false);
+        else if (m[1].includes('t')) {
+          const d = this.dialogs.get(key);
+          if (d) {
+            d.title = m[3];
+            this.dialogNotify(d);
+          }
+        } else if (m[1].includes('m')) this.dialogOpen(m[2], (m[3].split(' ')[0] || m[2]).toLowerCase(), ctx);
+        return;
+      }
+      case 'did': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)\s?(.*)$/s.exec(args);
+        const d = m && this.dialogs.get(m[2].toLowerCase());
+        if (!m || !d) return;
+        const flags = m[1] ?? '';
+        for (const part of m[3].split(',')) {
+          const c = d.controls.find((x) => x.id === Number(part));
+          if (!c) continue;
+          const listy = c.type === 'list' || c.type === 'combo';
+          const nm = /^(\d+)\s?(.*)$/s.exec(m[4]);
+          if (flags.includes('r')) {
+            c.lines = [];
+            c.sel = 0;
+            if (!listy) c.text = '';
+          }
+          if (flags.includes('a')) {
+            if (listy) c.lines.push(m[4]);
+            else c.text += m[4];
+          }
+          if (flags.includes('o') && listy && nm && c.lines[Number(nm[1]) - 1] !== undefined) c.lines[Number(nm[1]) - 1] = nm[2];
+          if (flags.includes('d') && listy && nm) {
+            c.lines.splice(Number(nm[1]) - 1, 1);
+            if (c.sel > c.lines.length) c.sel = 0;
+          }
+          if (flags.includes('c')) {
+            if (listy) c.sel = Math.min(c.lines.length, Number(nm?.[1] ?? 0));
+            else this.dialogCheck(d, c);
+          }
+          if (flags.includes('u')) {
+            if (listy) c.sel = 0;
+            else c.checked = false;
+          }
+          if (flags.includes('e')) c.enabled = true;
+          if (flags.includes('b')) c.enabled = false;
+          if (flags.includes('h')) c.visible = false;
+          if (flags.includes('v')) c.visible = true;
+        }
+        this.dialogNotify(d);
+        return;
+      }
+      case 'sockopen': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)\s+(\d+)/.exec(args);
+        if (!m) throw new MslError('uso: /sockopen [-e] nombre servidor puerto');
+        this.sockOpen(m[2], m[3], Number(m[4]), !!m[1]?.includes('e'), ctx);
+        return;
+      }
+      case 'sockwrite': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s?(.*)$/s.exec(args);
+        const sk = m && this.socks.get(m[2].toLowerCase());
+        if (!m || !sk) throw new MslError('socket no encontrado');
+        sk.socket.write(m[3] + (m[1]?.includes('n') ? '\r\n' : ''));
+        return;
+      }
+      case 'sockclose':
+        for (const [k, sk] of [...this.socks]) {
+          if (wildMatch(args.trim() || '*', k)) {
+            this.socks.delete(k);
+            sk.socket.destroy();
+          }
+        }
+        return;
       case 'hmake':
         this.hashes.set(args.replace(/^-\w+\s+/, '').split(' ')[0].toLowerCase(), new Map());
         return;
@@ -893,23 +1304,23 @@ export class MslEngine {
   // --------------------------------------------------------- variables
 
   getVar(name: string, ctx: MslContext): string {
-    const k = name.toLowerCase();
+    const k = this.expand(name).toLowerCase();
     return ctx.locals.get(k) ?? this.vars.get(k) ?? '';
   }
 
   private setVar(name: string, value: string, ctx: MslContext, forceGlobal: boolean): void {
-    const k = name.toLowerCase();
+    const k = this.expand(name).toLowerCase();
     if (!forceGlobal && ctx.locals.has(k)) ctx.locals.set(k, value);
     else this.setGlobal(k, value);
   }
 
   private setGlobal(name: string, value: string): void {
-    this.vars.set(name.toLowerCase(), value);
+    this.vars.set(this.expand(name).toLowerCase(), value);
     this.onVarsChanged?.();
   }
 
   private unsetGlobal(name: string): void {
-    if (this.vars.delete(name.toLowerCase())) this.onVarsChanged?.();
+    if (this.vars.delete(this.expand(name).toLowerCase())) this.onVarsChanged?.();
   }
 
   private safePath(nameIn: string): string | null {
@@ -1048,7 +1459,187 @@ export class MslEngine {
   // -------------------------------------------------------- evaluación
 
   /** Sustituye variables e identificadores en un texto. Los valores sustituidos no se reevalúan. */
-  evalText(s: string, ctx: MslContext): string {
+  /** Sustituye los marcadores de corchetes ya evaluados por su valor. */
+  private expand(s: string): string {
+    if (!s.includes(PH_OPEN)) return s;
+    return s.replace(/\uE000(\d+)\uE001/g, (_m, id) => this.placeholders[Number(id)] ?? '');
+  }
+
+  /**
+   * Corchetes de evaluación de mIRC: `[ expr ]` se evalúa antes que el resto y `[ $+ expr ]` se pega
+   * a la palabra anterior, lo que permite variables dinámicas como `%puntos. [ $+ [ $nick ] ]`.
+   * El valor se inserta como texto literal: no se vuelve a evaluar.
+   */
+  private resolveBrackets(text: string, ctx: MslContext): string {
+    const toks = text.split(' ');
+    for (;;) {
+      const close = toks.indexOf(']');
+      if (close === -1) break;
+      const open = toks.lastIndexOf('[', close);
+      if (open === -1) break;
+      const inner = toks.slice(open + 1, close);
+      const glue = inner[0] === '$+';
+      const value = this.evalText((glue ? inner.slice(1) : inner).join(' '), ctx);
+      if (this.placeholders.length > 20000) this.placeholders = [];
+      const ph = `${PH_OPEN}${this.placeholders.push(value) - 1}${PH_CLOSE}`;
+      if (glue && open > 0) {
+        toks[open - 1] += ph;
+        toks.splice(open, close - open + 1);
+      } else toks.splice(open, close - open + 1, ph);
+    }
+    return toks.join(' ');
+  }
+
+  // ----------------------------------------------------- niveles de usuario
+
+  /** Niveles de un usuario según la lista de /auser; quien no está en ella tiene nivel 1. */
+  levelsOf(nick: string, address: string): string[] {
+    const full = `${nick}!${address || '*@*'}`;
+    const out: string[] = [];
+    for (const u of this.users) {
+      if (/[!@]/.test(u.mask) ? wildMatch(u.mask, full) : ircLower(u.mask) === ircLower(nick)) out.push(...u.levels);
+    }
+    return out.length ? out : ['1'];
+  }
+
+  /**
+   * ¿Puede este usuario disparar un evento del nivel indicado? Devuelve el nivel que coincide o null.
+   * `*` y `1` valen para todos; un nivel numérico lo cumplen ese nivel y los superiores (con `=`, solo ese);
+   * un nivel con nombre exige tenerlo.
+   */
+  private levelMatch(levelIn: string, nick: string, address: string): string | null {
+    let level = levelIn.replace(/^!/, '').replace(/^me:?/i, '').trim();
+    if (level === '' || level === '*') return this.levelsOf(nick, address)[0];
+    const exact = level.startsWith('=');
+    if (exact) level = level.slice(1);
+    const mine = this.levelsOf(nick, address);
+    for (const want of level.split(',')) {
+      const w = want.trim();
+      const hit = mine.find((m) =>
+        isNum(w) && isNum(m) ? (exact ? Number(m) === Number(w) : Number(m) >= Number(w)) : m.toLowerCase() === w.toLowerCase(),
+      );
+      if (hit !== undefined) return hit;
+    }
+    return null;
+  }
+
+  // ----------------------------------------------------------- diálogos
+
+  private dialogNotify(d: DialogView): void {
+    this.host.dialogChanged?.(d.name, { ...d, controls: d.controls.map((c) => ({ ...c, lines: [...c.lines], styles: [...c.styles] })) });
+  }
+
+  private dialogOpen(name: string, table: string, ctx: MslContext): void {
+    const key = name.toLowerCase();
+    if (this.dialogs.has(key)) return;
+    let def: DialogDef | undefined;
+    for (const sc of this.scripts.values()) def ??= sc.dialogs.get(table);
+    if (!def) throw new MslError(`no existe la tabla de diálogo "${table}"`);
+    const d: DialogView = {
+      name, title: def.title, w: def.w, h: def.h, dbu: def.dbu,
+      controls: def.controls.map((c) => ({ ...c, styles: [...c.styles], lines: [], sel: 0, checked: false, enabled: !c.styles.includes('disable'), visible: !c.styles.includes('hide') })),
+    };
+    const firstTab = d.controls.find((c) => c.type === 'tab');
+    if (firstTab) firstTab.checked = true;
+    this.dialogs.set(key, d);
+    this.fire('DIALOG', { cid: ctx.cid, dname: name, devent: 'init', did: '0' });
+    if (this.dialogs.get(key) === d) this.dialogNotify(d);
+  }
+
+  private dialogClose(key: string, fireEvent: boolean): void {
+    const d = this.dialogs.get(key);
+    if (!d) return;
+    if (fireEvent) this.fire('DIALOG', { cid: null, dname: d.name, devent: 'close', did: '0' });
+    this.dialogs.delete(key);
+    this.host.dialogChanged?.(d.name, null);
+  }
+
+  /** Marca una casilla; en los botones de opción desmarca los demás de su grupo. */
+  private dialogCheck(d: DialogView, c: DialogControlView): void {
+    if (c.type === 'tab') for (const t of d.controls) if (t.type === 'tab') t.checked = false;
+    if (c.type === 'radio') {
+      const radios = d.controls.filter((x) => x.type === 'radio');
+      const idx = radios.indexOf(c);
+      let start = idx;
+      while (start > 0 && !radios[start].styles.includes('group')) start--;
+      let end = idx + 1;
+      while (end < radios.length && !radios[end].styles.includes('group')) end++;
+      for (const r of radios.slice(start, end)) r.checked = false;
+    }
+    c.checked = true;
+  }
+
+  /** Acción del usuario sobre un diálogo, enviada por la interfaz. */
+  dialogEvent(name: string, event: string, id: number, value: { text?: string; checked?: boolean; sel?: number } = {}): void {
+    const key = name.toLowerCase();
+    const d = this.dialogs.get(key);
+    if (!d) return;
+    if (event === 'close') {
+      this.dialogClose(key, true);
+      return;
+    }
+    const c = d.controls.find((x) => x.id === id);
+    if (!c || !c.enabled || !['sclick', 'dclick', 'edit'].includes(event)) return;
+    if (typeof value.text === 'string' && (c.type === 'edit' || c.type === 'combo')) c.text = value.text.slice(0, 20000);
+    if (typeof value.sel === 'number' && (c.type === 'list' || c.type === 'combo')) c.sel = Math.max(0, Math.min(c.lines.length, Math.trunc(value.sel)));
+    if (typeof value.checked === 'boolean') {
+      if (c.type === 'check') c.checked = value.checked;
+      else if (c.type === 'radio' && value.checked) this.dialogCheck(d, c);
+    }
+    if (c.type === 'tab' && event === 'sclick') this.dialogCheck(d, c);
+    this.fire('DIALOG', { cid: null, dname: d.name, devent: event, did: String(id) });
+    if (this.dialogs.get(key) !== d) return;
+    // Los botones «ok» y «cancel» cierran el diálogo tras su evento, como en mIRC.
+    if (c.type === 'button' && event === 'sclick' && (c.styles.includes('ok') || c.styles.includes('cancel'))) this.dialogClose(key, true);
+    else if (c.type === 'radio' || c.type === 'tab') this.dialogNotify(d);
+  }
+
+  // ------------------------------------------------------------ sockets
+
+  private sockOpen(name: string, host: string, port: number, secure: boolean, ctx: MslContext): void {
+    const key = name.toLowerCase();
+    if (this.socks.has(key)) throw new MslError(`el socket "${name}" ya existe`);
+    const socket = secure ? tls.connect({ host, port, servername: net.isIP(host) ? undefined : host }) : net.connect({ host, port });
+    const sk: ScriptSocket = { name, socket, buf: Buffer.alloc(0), cid: ctx.cid, open: false };
+    this.socks.set(key, sk);
+    const alive = () => this.socks.get(key) === sk;
+    socket.setTimeout(60000, () => socket.destroy(new Error('tiempo de espera agotado')));
+    socket.on(secure ? 'secureConnect' : 'connect', () => {
+      sk.open = true;
+      socket.setTimeout(0);
+      if (alive()) this.fire('SOCKOPEN', { cid: sk.cid, sockname: name, sockerr: 0 });
+    });
+    socket.on('data', (d: Buffer) => {
+      if (!alive()) return;
+      sk.buf = Buffer.concat([sk.buf, d]);
+      if (sk.buf.length > 4 * 1024 * 1024) sk.buf = sk.buf.subarray(sk.buf.length - 1024 * 1024);
+      for (let n = 0; n < 100000 && alive() && sk.buf.length; n++) {
+        const before = sk.buf.length;
+        this.fire('SOCKREAD', { cid: sk.cid, sockname: name, sockerr: 0 });
+        if (sk.buf.length === before) break;
+      }
+    });
+    socket.on('error', () => {
+      if (alive() && !sk.open) this.fire('SOCKOPEN', { cid: sk.cid, sockname: name, sockerr: 3 });
+    });
+    socket.on('close', () => {
+      if (!alive()) return;
+      // Lo que quede sin salto de línea final se entrega antes de cerrar.
+      if (sk.buf.length) {
+        sk.buf = Buffer.concat([sk.buf, Buffer.from('\n')]);
+        for (let n = 0; n < 100000 && sk.buf.length; n++) {
+          const before = sk.buf.length;
+          this.fire('SOCKREAD', { cid: sk.cid, sockname: name, sockerr: 0 });
+          if (sk.buf.length === before) break;
+        }
+      }
+      this.socks.delete(key);
+      if (sk.open) this.fire('SOCKCLOSE', { cid: sk.cid, sockname: name, sockerr: 0 });
+    });
+  }
+
+  evalText(sIn: string, ctx: MslContext): string {
+    const s = sIn.includes('[ ') ? this.resolveBrackets(sIn, ctx) : sIn;
     const toks: Tok[] = [];
     const n = s.length;
     let i = 0;
@@ -1097,7 +1688,7 @@ export class MslEngine {
         merged.push(prev + next);
       } else merged.push(t);
     }
-    return merged.filter((t) => t !== '').join(' ');
+    return this.expand(merged.filter((t) => t !== '').join(' '));
   }
 
   private parseIdent(s: string, i: number, ctx: MslContext): { value: Tok; end: number } | null {
@@ -1178,7 +1769,39 @@ export class MslEngine {
       case 'address': return ctx.address ?? '';
       case 'site': return (ctx.address ?? '').split('@')[1] ?? '';
       case 'fulladdress': return ctx.nick && ctx.address ? `${ctx.nick}!${ctx.address}` : '';
+      case 'snick': return ctx.params[0] ?? '';
       case 'knick': return ctx.knick ?? '';
+      case 'ulevel': return ctx.ulevel ?? '';
+      case 'level': {
+        const who = a[0] ?? '';
+        const bang = who.indexOf('!');
+        return (bang === -1 ? this.levelsOf(who, '') : this.levelsOf(who.slice(0, bang), who.slice(bang + 1))).join(',');
+      }
+      case 'dname': return ctx.dname ?? '';
+      case 'devent': return ctx.devent ?? '';
+      case 'dialog': return this.dialogs.get((a[0] ?? '').toLowerCase())?.name ?? '';
+      case 'did': {
+        if (!args) return ctx.did ?? '';
+        // $did(id) dentro de un evento usa el diálogo actual; $did(nombre,id[,N]) lo nombra.
+        const named = a.length >= 2 && !isNum(a[0]);
+        const d = this.dialogs.get((named ? a[0] : ctx.dname ?? '').toLowerCase());
+        const c = d?.controls.find((x) => x.id === Number(named ? a[1] : a[0]));
+        if (!c) return '';
+        const listy = c.type === 'list' || c.type === 'combo';
+        const nArg = named ? a[2] : a[1];
+        if (prop === 'state') return c.checked ? '1' : '0';
+        if (prop === 'sel') return String(c.sel);
+        if (prop === 'lines') return String(listy ? c.lines.length : c.text.split('\n').length);
+        if (prop === 'enabled') return c.enabled ? '$true' : '$false';
+        if (prop === 'visible') return c.visible ? '$true' : '$false';
+        if (nArg !== undefined && nArg !== '') return (listy ? c.lines : c.text.split('\n'))[Number(nArg) - 1] ?? '';
+        if (listy) return c.type === 'combo' && c.sel === 0 ? c.text : c.lines[c.sel - 1] ?? '';
+        return c.text;
+      }
+      case 'sockname': return ctx.sockname ?? '';
+      case 'sockbr': return String(ctx.sockbr ?? 0);
+      case 'sockerr': return String(ctx.sockerr ?? 0);
+      case 'sock': return this.socks.get((a[0] ?? '').toLowerCase())?.name ?? '';
       case 'newnick': return ctx.newnick ?? '';
       case 'event': return (ctx.event ?? '').toLowerCase();
       case 'numeric': return ctx.numeric ?? '';

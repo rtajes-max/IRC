@@ -5,14 +5,14 @@
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { DccChat, DccOffer, DccReceive, DccSend, parseDccOffer } from './dcc';
+import { DccChat, DccOffer, DccReceive, DccSend, parseDccOffer, parseDccResume } from './dcc';
 import { IrcClient, MessageEvent } from './irc/client';
 import { stripFormatting } from './irc/formatting';
 import { IrcMessage, ircLower } from './irc/message';
 import { Logger } from './logs';
-import { MslContext, MslEngine, MslHost, newContext } from './msl/engine';
+import { DialogView, MenuEntry, MslContext, MslEngine, MslHost, newContext, wildMatch } from './msl/engine';
 import {
-  BufferType, DccInfo, LOCAL, Line, LineKind, NetworkConfig, NickEntry, STATUS, ScriptInfo, SessionInfo, Settings,
+  BufferType, ChannelListEntry, DccInfo, LOCAL, Line, LineKind, NetworkConfig, NickEntry, STATUS, ScriptInfo, SessionInfo, Settings,
   Snapshot, UiEvent,
 } from './types';
 
@@ -29,6 +29,8 @@ interface Session {
   state: SessionInfo['state'];
   reconnects: number;
   reconnectTimer: NodeJS.Timeout | null;
+  pendingRegistration?: { password: string; at: number };
+  chanlist?: ChannelListEntry[];
 }
 
 interface DccEntry {
@@ -37,10 +39,12 @@ interface DccEntry {
   recv?: DccReceive;
   send?: DccSend;
   chat?: DccChat;
+  token?: string;
+  resumeTimer?: NodeJS.Timeout;
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  nick: 'usuario' + Math.floor(Math.random() * 9000 + 1000),
+  nick: 'onda' + Math.floor(Math.random() * 9000 + 1000),
   username: 'onda',
   realname: 'Usuario de Onda IRC',
   quitMessage: 'Onda IRC',
@@ -50,6 +54,22 @@ const DEFAULT_SETTINGS: Settings = {
   logging: true,
   notifications: true,
   sendTyping: true,
+  ignore: [],
+  notify: [],
+};
+
+/** Cifrado de contraseñas guardadas (en la aplicación lo aporta el almacén de claves del sistema). */
+export interface SecretCodec {
+  encrypt(plain: string): string;
+  decrypt(cipher: string): string;
+}
+
+const SECRET_PREFIX = 'enc:v1:';
+const SECRET_FIELDS = ['password', 'saslPassword'] as const;
+
+/** Red preconfigurada en la primera ejecución. */
+export const DEFAULT_NETWORK: NetworkConfig = {
+  name: 'RogerNet', host: 'irc.rogertp.es', port: 6697, tls: true, nick: '', autojoin: ['#general'],
 };
 
 export class AppCore extends EventEmitter implements MslHost {
@@ -69,9 +89,12 @@ export class AppCore extends EventEmitter implements MslHost {
   private nextSid = 1;
   private nextDcc = 1;
   private varsTimer: NodeJS.Timeout | null = null;
+  private secrets: SecretCodec | null;
+  private windows = new Map<string, string>();
 
-  constructor(opts: { dataDir: string; downloadsDir?: string; version?: string }) {
+  constructor(opts: { dataDir: string; downloadsDir?: string; version?: string; secrets?: SecretCodec }) {
     super();
+    this.secrets = opts.secrets ?? null;
     this.rootDir = opts.dataDir;
     this.dataDir = path.join(opts.dataDir, 'data');
     this.scriptsDir = path.join(opts.dataDir, 'scripts');
@@ -90,6 +113,8 @@ export class AppCore extends EventEmitter implements MslHost {
       }, 500);
       this.varsTimer.unref();
     };
+    this.engine.onUsersChanged = () =>
+      fs.writeFileSync(path.join(this.rootDir, 'users.json'), JSON.stringify(this.engine.users, null, 2));
     for (const file of fs.readdirSync(this.scriptsDir).sort()) {
       if (file.endsWith('.mrc')) this.engine.load(file, fs.readFileSync(path.join(this.scriptsDir, file), 'utf8'));
     }
@@ -101,9 +126,10 @@ export class AppCore extends EventEmitter implements MslHost {
     try {
       const cfg = JSON.parse(fs.readFileSync(path.join(this.rootDir, 'config.json'), 'utf8'));
       this.settings = { ...DEFAULT_SETTINGS, ...(cfg.settings ?? {}) };
-      this.networks = Array.isArray(cfg.networks) ? cfg.networks : [];
+      this.networks = (Array.isArray(cfg.networks) ? cfg.networks : []).map((n: NetworkConfig) => this.openSecrets(n));
     } catch {
-      /* primera ejecución */
+      // Primera ejecución: la red propia queda preconfigurada.
+      this.networks = [{ ...DEFAULT_NETWORK, nick: this.settings.nick }];
     }
     try {
       const vars = JSON.parse(fs.readFileSync(path.join(this.rootDir, 'vars.json'), 'utf8'));
@@ -111,10 +137,47 @@ export class AppCore extends EventEmitter implements MslHost {
     } catch {
       /* sin variables guardadas */
     }
+    try {
+      const users = JSON.parse(fs.readFileSync(path.join(this.rootDir, 'users.json'), 'utf8'));
+      if (Array.isArray(users)) {
+        this.engine.users = users
+          .filter((u) => u && typeof u.mask === 'string' && Array.isArray(u.levels))
+          .map((u) => ({ mask: u.mask, levels: u.levels.map(String) }));
+      }
+    } catch {
+      /* sin lista de usuarios */
+    }
   }
 
   private saveConfig(): void {
-    fs.writeFileSync(path.join(this.rootDir, 'config.json'), JSON.stringify({ settings: this.settings, networks: this.networks }, null, 2));
+    const networks = this.networks.map((n) => this.sealSecrets(n));
+    fs.writeFileSync(path.join(this.rootDir, 'config.json'), JSON.stringify({ settings: this.settings, networks }, null, 2));
+  }
+
+  /** Cifra las contraseñas de una red antes de escribirla en disco (si hay almacén de claves). */
+  private sealSecrets(n: NetworkConfig): NetworkConfig {
+    const out = { ...n };
+    if (!this.secrets) return out;
+    for (const f of SECRET_FIELDS) {
+      const v = out[f];
+      if (v) out[f] = SECRET_PREFIX + this.secrets.encrypt(v);
+    }
+    return out;
+  }
+
+  private openSecrets(n: NetworkConfig): NetworkConfig {
+    const out = { ...n };
+    for (const f of SECRET_FIELDS) {
+      const v = out[f];
+      if (!v || !v.startsWith(SECRET_PREFIX)) continue;
+      try {
+        if (!this.secrets) throw new Error('sin almacén de claves');
+        out[f] = this.secrets.decrypt(v.slice(SECRET_PREFIX.length));
+      } catch {
+        delete out[f]; // no se puede descifrar: habrá que volver a escribirla
+      }
+    }
+    return out;
   }
 
   private saveVars(): void {
@@ -160,6 +223,8 @@ export class AppCore extends EventEmitter implements MslHost {
       settings: this.settings,
       networks: this.networks,
       dccs: [...this.dccs.values()].map((d) => d.info),
+      windows: [...this.windows.values()],
+      dialogs: [...this.engine.dialogs.values()],
     };
   }
 
@@ -228,6 +293,12 @@ export class AppCore extends EventEmitter implements MslHost {
     this.ui({ type: 'nicks', sid: s.sid, buffer: chan, nicks: this.nickList(s, chan) });
   }
 
+  /** ¿Está ignorado este remitente? Se compara el nick y la máscara completa nick!usuario@host. */
+  private ignored(nick: string, hostmask: string): boolean {
+    const full = `${nick}!${hostmask || '*@*'}`;
+    return this.settings.ignore.some((m) => (/[!@]/.test(m) ? wildMatch(m, full) : wildMatch(m, nick)));
+  }
+
   // --------------------------------------------------------- conexiones
 
   connect(cfg: NetworkConfig): string {
@@ -266,7 +337,10 @@ export class AppCore extends EventEmitter implements MslHost {
     if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
     s.reconnectTimer = null;
     s.client.removeAllListeners();
-    s.client = this.makeClient(s.cfg);
+    // Al reconectar se vuelve a entrar en los canales que estaban abiertos.
+    const open = [...s.buffers.values()].filter((b) => b.type === 'channel').map((b) => b.name);
+    const autojoin = [...new Set([...(s.cfg.autojoin ?? []), ...open].map((c) => c.trim()).filter(Boolean))];
+    s.client = this.makeClient({ ...s.cfg, autojoin });
     s.state = 'connecting';
     this.ui({ type: 'session', ...this.sessionInfo(s) });
     this.wire(s);
@@ -308,11 +382,27 @@ export class AppCore extends EventEmitter implements MslHost {
     c.on('sasl', (ok: boolean, text: string) =>
       ok ? this.note(sid, STATUS, 'Autenticación SASL correcta') : this.error(sid, STATUS, `Falló la autenticación SASL: ${text}`),
     );
+    c.on('loggedin', (account: string) => {
+      this.note(sid, STATUS, `Sesión iniciada como ${account}`);
+      // Tras /register, la cuenta se guarda en la red para identificarse sola (SASL) en adelante.
+      const pending = s.pendingRegistration;
+      s.pendingRegistration = undefined;
+      if (!pending || Date.now() - pending.at > 120000) return;
+      s.cfg = { ...s.cfg, saslAccount: account || c.nick, saslPassword: pending.password };
+      if (this.networks.some((n) => n.name === s.cfg.name)) {
+        this.saveNetwork(s.cfg);
+        this.note(sid, STATUS, 'Cuenta registrada. Se ha guardado en esta red para identificarte automáticamente.');
+      } else this.note(sid, STATUS, 'Cuenta registrada. Guarda esta red desde «Conectar» para identificarte automáticamente.');
+    });
     c.on('registered', () => {
       s.state = 'connected';
       s.reconnects = 0;
       this.ui({ type: 'session', ...this.sessionInfo(s) });
       this.engine.fire('CONNECT', base({ nick: c.nick, isMe: true }));
+      for (const line of s.cfg.perform ?? []) {
+        const cmd = line.trim();
+        if (cmd) this.engine.execLine(cmd.startsWith('/') ? cmd : '/' + cmd, this.ctxFor(sid, STATUS), cmd.startsWith('//'));
+      }
     });
     c.on('close', ({ wasConnected, byUser }: { wasConnected: boolean; byUser: boolean }) => {
       if (!this.sessions.has(sid)) return;
@@ -334,6 +424,33 @@ export class AppCore extends EventEmitter implements MslHost {
 
     c.on('numeric', (msg: IrcMessage) => {
       const text = msg.params.slice(1).join(' ');
+      // Lista de canales (/list): se reúne y se entrega entera a la interfaz.
+      if (msg.command === '321') {
+        s.chanlist = [];
+        return;
+      }
+      if (msg.command === '322' && s.chanlist) {
+        if (s.chanlist.length < 20000) s.chanlist.push({ name: msg.params[1] ?? '', users: Number(msg.params[2]) || 0, topic: msg.params[3] ?? '' });
+        return;
+      }
+      if (msg.command === '323' && s.chanlist) {
+        this.ui({ type: 'chanlist', sid, channels: s.chanlist.sort((a, b) => b.users - a.users) });
+        this.note(sid, STATUS, `Lista de canales recibida: ${s.chanlist.length}`);
+        s.chanlist = undefined;
+        return;
+      }
+      // Avisos de amigos (MONITOR): 730 en línea, 731 desconectado.
+      if (msg.command === '730' || msg.command === '731') {
+        const where = this.active.sid === sid ? this.active.buffer : STATUS;
+        for (const entry of (msg.params[1] ?? '').split(',')) {
+          const nick = entry.split('!')[0];
+          if (nick) this.line(sid, s.buffers.has(ircLower(where)) ? where : STATUS, 'info', msg.command === '730' ? `${nick} está en línea` : `${nick} se ha desconectado`, { highlight: msg.command === '730' });
+        }
+        return;
+      }
+      if ((msg.command === '376' || msg.command === '422') && this.settings.notify.length && c.isupport.MONITOR !== undefined) {
+        c.send(`MONITOR + ${this.settings.notify.join(',')}`);
+      }
       const r = this.engine.fire('RAW', base({ numeric: msg.command, rawmsg: msg.raw, text: msg.params.join(' ') }), true);
       if (!r.haltdef && !['353', '366'].includes(msg.command)) {
         const isError = /^[45]\d\d$/.test(msg.command);
@@ -350,6 +467,7 @@ export class AppCore extends EventEmitter implements MslHost {
         nick: m.from, chan: isChan ? m.target : undefined, target: isChan ? m.target : c.nick, address: m.hostmask,
         text: m.text, isMe: m.self,
       });
+      if (!m.self && this.ignored(m.from, m.hostmask)) return;
       const scripted = !m.self && !m.history;
       if (scripted && this.engine.fire(event, init, true).haltdef) return;
 
@@ -452,13 +570,16 @@ export class AppCore extends EventEmitter implements MslHost {
     c.on('names', (e: { channel: string }) => this.emitNicks(s, e.channel));
     c.on('typing', (e: { nick: string; target: string; state: string }) => this.ui({ type: 'typing', sid, buffer: e.target, nick: e.nick, state: e.state }));
     c.on('react', (e: { nick: string; target: string; emoji: string; msgid: string }) => this.ui({ type: 'react', sid, buffer: e.target, ...e }));
-    c.on('invite', (e: { nick: string; channel: string }) => this.note(sid, STATUS, `${e.nick} te invita a ${e.channel}`));
+    c.on('invite', (e: { nick: string; channel: string }) => {
+      if (!this.ignored(e.nick, '')) this.note(sid, STATUS, `${e.nick} te invita a ${e.channel}`);
+    });
     c.on('ctcpreply', (e: { from: string; command: string; args: string }) => {
       let text = e.args;
       if (e.command === 'PING' && /^\d+$/.test(e.args)) text = `${((Date.now() - Number(e.args)) / 1000).toFixed(2)} s`;
       this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'ctcp', `[${e.from} respuesta ${e.command}] ${text}`);
     });
     c.on('ctcp', (e: { from: string; target: string; command: string; args: string; hostmask: string }) => {
+      if (this.ignored(e.from, e.hostmask)) return;
       if (e.command === 'DCC') {
         this.onDccOffer(s, e.from, e.args);
         return;
@@ -473,7 +594,10 @@ export class AppCore extends EventEmitter implements MslHost {
   private ctxFor(sid: string, buffer: string): MslContext {
     const s = this.sessions.get(sid);
     const isChan = !!s && s.buffers.get(ircLower(buffer))?.type === 'channel';
-    return newContext({ cid: s ? sid : null, chan: isChan ? buffer : undefined, target: buffer === STATUS ? undefined : buffer, nick: s?.client.nick });
+    return newContext({
+      cid: s ? sid : null, chan: isChan ? buffer : undefined, target: buffer === STATUS ? undefined : buffer,
+      nick: s?.client.nick ?? this.settings.nick,
+    });
   }
 
   /** Procesa lo que el usuario escribe en un búfer. */
@@ -488,6 +612,7 @@ export class AppCore extends EventEmitter implements MslHost {
       }
       const init = { cid: ctx.cid, chan: ctx.chan, target: ctx.target, nick: ctx.nick, text: line, isMe: true };
       if (this.engine.fire('INPUT', init).haltdef) continue;
+      if (buffer.startsWith('@')) continue; // ventana personalizada: solo la atienden los scripts (on INPUT)
       this.sayTo(sid, buffer, line);
     }
   }
@@ -516,7 +641,17 @@ export class AppCore extends EventEmitter implements MslHost {
     if (s && this.settings.sendTyping && buffer !== STATUS && !buffer.startsWith('=') && s.client.registered) s.client.typing(buffer, state);
   }
 
+  private closeWindow(name: string): boolean {
+    const real = this.windows.get(name.toLowerCase());
+    if (!real) return false;
+    this.windows.delete(name.toLowerCase());
+    this.ui({ type: 'buffer:remove', sid: LOCAL, buffer: real });
+    if (this.active.sid === LOCAL && this.active.buffer.toLowerCase() === name.toLowerCase()) this.active = { sid: LOCAL, buffer: STATUS };
+    return true;
+  }
+
   closeBuffer(sid: string, buffer: string): void {
+    if (buffer.startsWith('@') && this.closeWindow(buffer)) return;
     const s = this.sessions.get(sid);
     if (!s) return;
     const b = s.buffers.get(ircLower(buffer));
@@ -551,10 +686,24 @@ export class AppCore extends EventEmitter implements MslHost {
   echo(text: string, target: string | null, ctx: MslContext, flags: string): void {
     const s = this.sessionOf(ctx);
     const sid = s?.sid ?? LOCAL;
+    if (target?.startsWith('@')) {
+      const name = this.windows.get(target.toLowerCase());
+      if (name) this.ui({ type: 'line', sid: LOCAL, buffer: name, line: { time: Date.now(), kind: 'echo', text } });
+      return;
+    }
     let buffer = STATUS;
     if (target && s?.buffers.has(ircLower(target))) buffer = s.buffers.get(ircLower(target))!.name;
     else if (flags.includes('a') && this.active.sid === sid) buffer = this.active.buffer;
     this.ui({ type: 'line', sid, buffer, line: { time: Date.now(), kind: 'echo', text } });
+  }
+
+  dialogChanged(name: string, view: DialogView | null): void {
+    this.ui({ type: 'dialog', name, view });
+  }
+
+  /** Acción del usuario sobre un diálogo de script (clic, texto, selección o cierre). */
+  dialogEvent(name: string, event: string, id: number, value?: { text?: string; checked?: boolean; sel?: number }): void {
+    this.engine.dialogEvent(String(name), String(event), Number(id) || 0, value && typeof value === 'object' ? value : {});
   }
 
   raw(line: string, ctx: MslContext): void {
@@ -691,6 +840,55 @@ export class AppCore extends EventEmitter implements MslHost {
         if (!online()) return fail('No estás conectado');
         s!.client.send(`MODE ${toks.length && !/^[+-]/.test(toks[0]) ? args : `${chan || s!.client.nick} ${args}`}`);
         return true;
+      case 'register': {
+        if (!online()) return fail('No estás conectado');
+        if (!toks[0]) return fail('Uso: /register contraseña  (registra tu nick actual como cuenta en la red)');
+        s!.pendingRegistration = { password: args, at: Date.now() };
+        s!.client.send(`PRIVMSG NickServ :REGISTER ${args}`);
+        this.note(sid, STATUS, `Solicitando el registro de la cuenta ${s!.client.nick}…`);
+        return true;
+      }
+      case 'notify': {
+        const where = this.active.sid === sid ? this.active.buffer : STATUS;
+        const remove = toks.includes('-r');
+        const nick = toks.filter((t) => !t.startsWith('-'))[0];
+        if (!nick) {
+          this.note(sid, where, this.settings.notify.length ? `Lista de avisos: ${this.settings.notify.join(', ')}` : 'Lista de avisos vacía. Uso: /notify nick  ·  /notify -r nick');
+          return true;
+        }
+        const has = this.settings.notify.some((n) => ircLower(n) === ircLower(nick));
+        if (remove) this.updateSettings({ notify: this.settings.notify.filter((n) => ircLower(n) !== ircLower(nick)) });
+        else if (!has) this.updateSettings({ notify: [...this.settings.notify, nick] });
+        this.note(sid, where, remove ? `${nick} eliminado de la lista de avisos` : `Se te avisará cuando ${nick} entre o salga de la red`);
+        if (online()) {
+          if (s!.client.isupport.MONITOR !== undefined) s!.client.send(`MONITOR ${remove ? '-' : '+'} ${nick}`);
+          else if (!remove) this.note(sid, where, 'Este servidor no admite avisos de presencia (MONITOR).');
+        }
+        return true;
+      }
+      case 'list':
+        if (!online()) return fail('No estás conectado');
+        s!.client.send(args ? `LIST ${args}` : 'LIST');
+        this.note(sid, STATUS, 'Pidiendo la lista de canales…');
+        return true;
+      case 'ignore':
+      case 'unignore': {
+        const where = this.active.sid === sid ? this.active.buffer : STATUS;
+        const mask = toks.filter((t) => !t.startsWith('-'))[0];
+        if (!mask) {
+          this.note(sid, where, this.settings.ignore.length ? `Ignorados: ${this.settings.ignore.join(', ')}` : 'No ignoras a nadie. Uso: /ignore nick  ·  /unignore nick');
+          return true;
+        }
+        const has = this.settings.ignore.some((m) => m.toLowerCase() === mask.toLowerCase());
+        if (name === 'ignore' && !toks.includes('-r')) {
+          if (!has) this.updateSettings({ ignore: [...this.settings.ignore, mask] });
+          this.note(sid, where, `Ignorando a ${mask}`);
+        } else {
+          this.updateSettings({ ignore: this.settings.ignore.filter((m) => m.toLowerCase() !== mask.toLowerCase()) });
+          this.note(sid, where, has ? `Ya no ignoras a ${mask}` : `${mask} no estaba ignorado`);
+        }
+        return true;
+      }
       case 'whois':
         if (!online()) return fail('No estás conectado');
         s!.client.send(`WHOIS ${toks[0] ?? s!.client.nick}`);
@@ -715,8 +913,40 @@ export class AppCore extends EventEmitter implements MslHost {
         if (!s?.client.connected) return fail('No estás conectado');
         s.client.send(args);
         return true;
+      case 'window': {
+        const flags = toks[0]?.startsWith('-') ? toks.shift()! : '';
+        const name = toks[0] ?? '';
+        if (!name.startsWith('@') || name.length < 2) return fail('Uso: /window [-c] @nombre');
+        if (flags.includes('c')) {
+          this.closeWindow(name);
+          return true;
+        }
+        if (!this.windows.has(name.toLowerCase())) {
+          this.windows.set(name.toLowerCase(), name);
+          this.ui({ type: 'buffer:add', sid: LOCAL, buffer: name, bufferType: 'custom' });
+        }
+        if (!flags.includes('h') && !flags.includes('n')) {
+          this.ui({ type: 'activate', sid: LOCAL, buffer: this.windows.get(name.toLowerCase())! });
+          this.active = { sid: LOCAL, buffer: this.windows.get(name.toLowerCase())! };
+        }
+        return true;
+      }
+      case 'aline': {
+        while (toks[0]?.startsWith('-')) toks.shift();
+        let color = '';
+        if (toks.length > 2 && /^\d{1,2}$/.test(toks[0])) color = toks.shift()!;
+        const name = this.windows.get((toks[0] ?? '').toLowerCase());
+        if (!name) return fail('Uso: /aline [color] @ventana texto (la ventana debe existir: /window @nombre)');
+        const text = toks.slice(1).join(' ');
+        this.ui({ type: 'line', sid: LOCAL, buffer: name, line: { time: Date.now(), kind: 'echo', text: color ? `\x03${color.padStart(2, '0')}${text}` : text } });
+        return true;
+      }
       case 'clear':
-        this.ui({ type: 'buffer:clear', sid, buffer: here });
+        if (toks[0]?.startsWith('@') && this.windows.has(toks[0].toLowerCase())) {
+          this.ui({ type: 'buffer:clear', sid: LOCAL, buffer: this.windows.get(toks[0].toLowerCase())! });
+          return true;
+        }
+        this.ui({ type: 'buffer:clear', sid: this.active.buffer.startsWith('@') ? LOCAL : sid, buffer: this.active.buffer.startsWith('@') ? this.active.buffer : here });
         return true;
       case 'close':
         this.closeBuffer(sid, toks[0] ?? here);
@@ -742,15 +972,17 @@ export class AppCore extends EventEmitter implements MslHost {
       case 'dcc': {
         const sub = (toks[0] ?? '').toLowerCase();
         if (!online()) return fail('No estás conectado');
-        if (sub === 'send' && toks[1] && toks[2]) void this.dccSend(sid, toks[1], tail(2).replace(/^"(.*)"$/, '$1'));
+        const passive = toks[1] === '-p';
+        if (passive) toks.splice(1, 1);
+        if (sub === 'send' && toks[1] && toks[2]) void this.dccSend(sid, toks[1], toks.slice(2).join(' ').replace(/^"(.*)"$/, '$1'), passive);
         else if (sub === 'chat' && toks[1]) void this.dccChat(sid, toks[1]);
-        else return fail('Uso: /dcc send nick archivo  ·  /dcc chat nick');
+        else return fail('Uso: /dcc send [-p] nick archivo  ·  /dcc chat nick  (-p: envío pasivo, si no puedes recibir conexiones)');
         return true;
       }
       case 'help':
         for (const l of [
           'Comandos principales: /server [-e] host[:puerto] · /join #canal · /part · /msg nick texto · /query nick · /me acción',
-          '/nick · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
+          '/nick · /register contraseña · /ignore nick · /notify nick · /list · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
           'Scripts mIRC: /load archivo.mrc · /unload archivo.mrc · // evalúa identificadores (p. ej. //echo -a $me)',
         ]) this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'info', l);
         return true;
@@ -759,6 +991,24 @@ export class AppCore extends EventEmitter implements MslHost {
   }
 
   // ------------------------------------------------------------ scripts
+
+  private menuContext(sid: string, buffer: string, nick?: string): MslContext {
+    const ctx = this.ctxFor(sid, buffer);
+    if (nick) ctx.params = [nick];
+    else if (!ctx.chan && ctx.target) ctx.params = [ctx.target];
+    return ctx;
+  }
+
+  /** Popups de los scripts para la ventana indicada: nicklist si se pasa un nick; si no, según el tipo de búfer. */
+  scriptMenu(sid: string, buffer: string, nick?: string): MenuEntry[] {
+    const type = this.sessions.get(sid)?.buffers.get(ircLower(buffer))?.type;
+    const kind = nick ? 'nicklist' : type === 'channel' ? 'channel' : type === 'query' || type === 'dcc' ? 'query' : 'status';
+    return this.engine.menu(kind, this.menuContext(sid, buffer, nick));
+  }
+
+  runScriptMenu(id: string, sid: string, buffer: string, nick?: string): void {
+    this.engine.runMenu(String(id), this.menuContext(sid, buffer, nick));
+  }
 
   private loadScriptFile(file: string): ScriptInfo {
     const source = fs.readFileSync(path.join(this.scriptsDir, file), 'utf8');
@@ -812,11 +1062,42 @@ export class AppCore extends EventEmitter implements MslHost {
   }
 
   private onDccOffer(s: Session, from: string, args: string): void {
+    const res = parseDccResume(args);
+    if (res) {
+      const same = (x: DccEntry) => x.info.sid === s.sid && ircLower(x.info.nick) === ircLower(from);
+      if (res.kind === 'RESUME') {
+        // El destinatario ya tiene parte del archivo: se envía solo lo que falta.
+        const mine = [...this.dccs.values()].find((x) => x.send && same(x) && x.info.status === 'waiting' && x.send.port === res.port);
+        if (mine?.send?.resumeFrom(res.position)) {
+          const name = mine.info.filename.includes(' ') ? `"${mine.info.filename}"` : mine.info.filename;
+          s.client.ctcp(from, 'DCC', `ACCEPT ${name} ${res.port} ${res.position}`);
+        }
+      } else {
+        const theirs = [...this.dccs.values()].find((x) => x.recv && x.resumeTimer && same(x) && x.offer?.port === res.port);
+        if (theirs && res.position === theirs.recv!.resumePosition()) {
+          clearTimeout(theirs.resumeTimer);
+          theirs.resumeTimer = undefined;
+          theirs.recv!.start(res.position);
+        }
+      }
+      return;
+    }
     const offer = parseDccOffer(args);
     if (!offer) {
       this.note(s.sid, STATUS, `${from} envió una oferta DCC que no se admite (${args.split(' ')[0]})`);
       return;
     }
+    // Respuesta a un envío pasivo nuestro: el destinatario indica dónde conectarse.
+    if (offer.type === 'SEND' && offer.token && offer.port > 0) {
+      const mine = [...this.dccs.values()].find(
+        (x) => x.send && x.token === offer.token && x.info.sid === s.sid && ircLower(x.info.nick) === ircLower(from) && x.info.status === 'waiting',
+      );
+      if (mine) {
+        mine.send!.connectTo(offer.ip, offer.port);
+        return;
+      }
+    }
+    if (offer.port === 0 && !offer.token) return;
     const d = this.newDcc({
       sid: s.sid, nick: from, direction: 'in', type: offer.type, filename: offer.type === 'SEND' ? offer.filename : '',
       size: offer.size, transferred: 0, status: 'offered',
@@ -843,7 +1124,24 @@ export class AppCore extends EventEmitter implements MslHost {
       });
       recv.on('error', (e: Error) => this.dccUpdate(d, { status: 'failed', error: e.message }));
       this.dccUpdate(d, { status: 'active' });
-      recv.start();
+      if (d.offer.token) {
+        recv
+          .listenPassive(s.client.localAddress)
+          .then((ctcp) => s.client.ctcp(d.info.nick, 'DCC', ctcp))
+          .catch((e: Error) => this.dccUpdate(d, { status: 'failed', error: e.message }));
+      } else {
+        const pos = recv.resumePosition();
+        if (pos > 0) {
+          // Hay una descarga parcial: se pide continuar; si el remitente no contesta, se empieza de cero.
+          const name = d.offer.filename.includes(' ') ? `"${d.offer.filename}"` : d.offer.filename;
+          s.client.ctcp(d.info.nick, 'DCC', `RESUME ${name} ${d.offer.port} ${pos}`);
+          d.resumeTimer = setTimeout(() => {
+            d.resumeTimer = undefined;
+            if (d.info.status === 'active') recv.start();
+          }, 8000);
+          d.resumeTimer.unref();
+        } else recv.start();
+      }
     } else {
       const chat = new DccChat();
       this.attachChat(s, d, chat);
@@ -854,6 +1152,8 @@ export class AppCore extends EventEmitter implements MslHost {
   dccReject(id: string): void {
     const d = this.dccs.get(id);
     if (!d) return;
+    if (d.resumeTimer) clearTimeout(d.resumeTimer);
+    d.resumeTimer = undefined;
     d.recv?.cancel();
     d.send?.cancel();
     d.chat?.close();
@@ -880,7 +1180,7 @@ export class AppCore extends EventEmitter implements MslHost {
     });
   }
 
-  async dccSend(sid: string, nick: string, filePath: string): Promise<void> {
+  async dccSend(sid: string, nick: string, filePath: string, passive = false): Promise<void> {
     const s = this.sessions.get(sid);
     if (!s) return;
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -900,7 +1200,8 @@ export class AppCore extends EventEmitter implements MslHost {
     });
     send.on('error', (e: Error) => this.dccUpdate(d, { status: 'failed', error: e.message }));
     try {
-      const ctcp = await send.listen(s.client.localAddress);
+      if (passive) d.token = String(Math.floor(Math.random() * 9e8) + 1e8);
+      const ctcp = passive ? send.passiveOffer(d.token!) : await send.listen(s.client.localAddress);
       s.client.ctcp(nick, 'DCC', ctcp);
       this.dccUpdate(d);
       this.note(sid, STATUS, `Ofreciendo "${d.info.filename}" a ${nick} por DCC…`);

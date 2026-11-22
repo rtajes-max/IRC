@@ -1,6 +1,6 @@
 import { MIRC_COLORS, parseFormatting, stripFormatting } from '../core/irc/formatting';
 import type {
-  BufferType, DccInfo, Line, NetworkConfig, NickEntry, ScriptInfo, SessionInfo, Settings, Snapshot, UiEvent,
+  BufferType, ChannelListEntry, DccInfo, DialogControlView, DialogView, Line, NetworkConfig, NickEntry, ScriptInfo, SessionInfo, Settings, Snapshot, UiEvent,
 } from '../core/types';
 
 const STATUS = '*';
@@ -86,12 +86,13 @@ function activate(sid: string, buffer: string): void {
   b.unread = 0;
   b.highlight = false;
   void window.onda.invoke('setActive', sid, b.name);
+  if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
   renderTree();
   renderLog();
   renderHeader();
   renderNicks();
   renderTyping();
-  input.focus();
+  if ($('find').hidden) input.focus();
 }
 
 // --------------------------------------------------------------- dibujado
@@ -108,7 +109,7 @@ function renderTree(): void {
   tree.replaceChildren();
   for (const s of sessions.values()) {
     const net = el('div', 'net');
-    const order: BufferType[] = ['status', 'channel', 'query', 'dcc'];
+    const order: BufferType[] = ['status', 'channel', 'query', 'dcc', 'custom'];
     const list = [...s.buffers.values()].sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type) || a.name.localeCompare(b.name));
     for (const b of list) {
       const row = el('button', 'item' + (b.type === 'status' ? ' net-row' : ''));
@@ -122,7 +123,7 @@ function renderTree(): void {
       row.addEventListener('click', () => activate(s.info.sid, b.name));
       row.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        if (s.info.sid === LOCAL) return;
+        if (s.info.sid === LOCAL && b.type !== 'custom') return;
         showMenu(e.clientX, e.clientY, [
           [b.type === 'status' ? 'Desconectar y cerrar' : b.type === 'channel' ? 'Salir del canal' : 'Cerrar', () => window.onda.invoke('closeBuffer', s.info.sid, b.name)],
         ]);
@@ -168,7 +169,7 @@ function renderNicks(): void {
     row.addEventListener('dblclick', () => send(`/query ${n.nick}`));
     const menu = (e: MouseEvent) => {
       e.preventDefault();
-      nickMenu(e.clientX, e.clientY, n.nick);
+      void nickMenu(e.clientX, e.clientY, n.nick);
     };
     row.addEventListener('contextmenu', menu);
     row.addEventListener('click', menu);
@@ -176,13 +177,47 @@ function renderNicks(): void {
   }
 }
 
-function nickMenu(x: number, y: number, nick: string): void {
+interface ScriptMenuEntry {
+  label: string;
+  id?: string;
+  separator?: boolean;
+  children?: ScriptMenuEntry[];
+}
+
+/** Convierte los popups de los scripts en elementos de menú; los submenús se muestran sangrados bajo su título. */
+async function scriptItems(nick?: string): Promise<MenuItem[]> {
+  const { sid, buffer } = active;
+  let entries: ScriptMenuEntry[] = [];
+  try {
+    entries = await window.onda.invoke<ScriptMenuEntry[]>('menu:get', sid, buffer, nick);
+  } catch {
+    return [];
+  }
+  const out: MenuItem[] = [];
+  const walk = (list: ScriptMenuEntry[], depth: number) => {
+    for (const e of list) {
+      const pad = '\u2003'.repeat(depth);
+      if (e.separator) out.push(null);
+      else if (e.children) {
+        out.push([pad + e.label, null]);
+        walk(e.children, depth + 1);
+      } else if (e.id) out.push([pad + e.label, () => window.onda.invoke('menu:run', e.id, sid, buffer, nick)]);
+    }
+  };
+  walk(entries, 0);
+  return out;
+}
+
+async function nickMenu(x: number, y: number, nick: string): Promise<void> {
   const sid = active.sid;
+  const extra = await scriptItems(nick);
   const inChan = activeBuffer()?.type === 'channel';
   showMenu(x, y, [
     ['Conversación privada', () => send(`/query ${nick}`)],
     ['Información (whois)', () => send(`/whois ${nick}`)],
     ['Mencionar', () => insertText(nick + ': ')],
+    [settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'Dejar de ignorar' : 'Ignorar', () =>
+      send(`/${settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'unignore' : 'ignore'} ${nick}`)],
     null,
     ...(inChan
       ? ([
@@ -194,11 +229,13 @@ function nickMenu(x: number, y: number, nick: string): void {
         ] as MenuItem[])
       : []),
     ['Enviar archivo…', () => window.onda.invoke('dcc:send', sid, nick)],
+    ['Enviar archivo (modo pasivo)…', () => window.onda.invoke('dcc:send', sid, nick, true)],
     ['Chat directo (DCC)', () => window.onda.invoke('dcc:chat', sid, nick)],
+    ...(extra.length ? [null, ...extra] : []),
   ]);
 }
 
-type MenuItem = [string, () => unknown] | null;
+type MenuItem = [string, (() => unknown) | null] | null;
 
 function showMenu(x: number, y: number, items: MenuItem[]): void {
   const menu = $('context-menu');
@@ -208,11 +245,16 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
       menu.append(el('hr'));
       continue;
     }
+    const action = it[1];
+    if (!action) {
+      menu.append(el('div', 'menu-title', it[0]));
+      continue;
+    }
     const b = el('button', '', it[0]);
     b.type = 'button';
     b.addEventListener('click', () => {
       menu.hidden = true;
-      void it[1]();
+      void action();
     });
     menu.append(b);
   }
@@ -254,8 +296,25 @@ function appendFormatted(parent: HTMLElement, text: string): void {
   }
 }
 
+const RELAY_NETWORKS: Record<string, string> = { tg: 'Telegram', wa: 'WhatsApp' };
+
+/** Los puentes (relaymsg) usan nicks «Nombre/red», p. ej. «Ana/tg» para Telegram. */
+function splitRelay(nick: string): { name: string; network: string } {
+  const i = nick.lastIndexOf('/');
+  if (i <= 0 || i === nick.length - 1) return { name: nick, network: '' };
+  const label = nick.slice(i + 1);
+  return { name: nick.slice(0, i), network: RELAY_NETWORKS[label.toLowerCase()] ?? label };
+}
+
+let findQuery = '';
+
+function matchesFind(line: Line): boolean {
+  return !findQuery || `${line.nick ?? ''} ${stripFormatting(line.text)}`.toLowerCase().includes(findQuery);
+}
+
 function lineRow(b: BufferState, line: Line): HTMLElement {
   const row = el('div', `row ${line.kind}`);
+  if (findQuery && matchesFind(line)) row.classList.add('match');
   if (line.highlight) row.classList.add('highlight');
   if (line.self) row.classList.add('self');
   if (line.history) row.classList.add('history');
@@ -264,13 +323,18 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
   time.title = d.toLocaleString();
   row.append(time);
   if (line.nick && (line.kind === 'msg' || line.kind === 'notice')) {
-    const nick = el('span', 'nick', (line.prefix ?? '') + line.nick);
+    const relay = splitRelay(line.nick);
+    const nick = el('span', 'nick', (line.prefix ?? '') + relay.name);
     nick.style.color = nickColor(line.nick);
-    nick.addEventListener('click', (e) => nickMenu(e.clientX, e.clientY, line.nick!));
+    if (relay.network) {
+      nick.classList.add('relayed');
+      nick.title = `${relay.name}, desde ${relay.network}`;
+      nick.append(el('span', 'net-tag', relay.network));
+    } else nick.addEventListener('click', (e) => void nickMenu(e.clientX, e.clientY, line.nick!));
     row.append(nick);
   }
   const body = el('span', 'body');
-  if (line.kind === 'action') body.append(`* ${line.nick} `);
+  if (line.kind === 'action') body.append(`* ${splitRelay(line.nick ?? '').name} `);
   else if (line.kind !== 'msg' && line.kind !== 'notice' && line.kind !== 'echo') body.append('· ');
   appendFormatted(body, line.text);
   if (line.msgid) {
@@ -356,6 +420,186 @@ function fmtSize(n: number): string {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
+// ---------------------------------------------------- diálogos de scripts
+
+const openDialogs = new Map<string, { root: HTMLElement; controls: Map<number, HTMLElement> }>();
+
+function dialogSend(name: string, event: string, id: number, value?: { text?: string; checked?: boolean; sel?: number }): void {
+  void window.onda.invoke('dialog:event', name, event, id, value);
+}
+
+/** Crea o actualiza la ventana de un diálogo de script; con `view` nulo la cierra. */
+function syncDialog(name: string, view: DialogView | null): void {
+  const k = key(name);
+  let entry = openDialogs.get(k);
+  if (!view) {
+    entry?.root.remove();
+    openDialogs.delete(k);
+    return;
+  }
+  // Las tablas en «dbu» usan unidades de diálogo: aproximadamente 2 px por unidad.
+  const scale = view.dbu ? 2 : 1;
+  if (!entry) {
+    const root = el('section', 'msl-dialog');
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', view.title);
+    const bar = el('header');
+    const title = el('span', 'title', view.title);
+    const close = el('button', 'x', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Cerrar');
+    close.addEventListener('click', () => dialogSend(view.name, 'close', 0));
+    bar.append(title, close);
+    const body = el('div', 'body');
+    body.style.width = view.w * scale + 'px';
+    body.style.height = view.h * scale + 'px';
+    root.append(bar, body);
+    const offset = openDialogs.size * 24;
+    root.style.left = `max(8px, calc(50% - ${(view.w * scale) / 2}px + ${offset}px))`;
+    root.style.top = `${90 + offset}px`;
+    // Arrastrar por la barra de título
+    bar.addEventListener('pointerdown', (e) => {
+      if ((e.target as HTMLElement).closest('button')) return;
+      const r = root.getBoundingClientRect();
+      const dx = e.clientX - r.left;
+      const dy = e.clientY - r.top;
+      const move = (m: PointerEvent) => {
+        root.style.left = Math.max(0, Math.min(window.innerWidth - 60, m.clientX - dx)) + 'px';
+        root.style.top = Math.max(0, Math.min(window.innerHeight - 30, m.clientY - dy)) + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    entry = { root, controls: new Map() };
+    openDialogs.set(k, entry);
+    let strip: HTMLElement | null = null;
+    for (const c of view.controls) {
+      const node = makeDialogControl(view.name, c);
+      if (c.type === 'tab') {
+        // Todas las pestañas comparten una tira situada donde indica la primera.
+        if (!strip) {
+          strip = el('div', 'ctl tabs');
+          strip.setAttribute('role', 'tablist');
+          strip.style.left = c.x * scale + 'px';
+          strip.style.top = c.y * scale + 'px';
+          body.append(strip);
+        }
+        node.classList.add('tab');
+        entry.controls.set(c.id, node);
+        strip.append(node);
+        continue;
+      }
+      node.classList.add('ctl', 'ctl-' + c.type);
+      node.style.left = c.x * scale + 'px';
+      node.style.top = c.y * scale + 'px';
+      node.style.width = c.w * scale + 'px';
+      if (c.type !== 'combo' && c.type !== 'check' && c.type !== 'radio') node.style.height = c.h * scale + 'px';
+      entry.controls.set(c.id, node);
+      body.append(node);
+    }
+    $('script-dialogs').append(root);
+  }
+  entry.root.querySelector('.title')!.textContent = view.title;
+  const activeTab = view.controls.find((c) => c.type === 'tab' && c.checked)?.id;
+  for (const c of view.controls) {
+    const node = entry.controls.get(c.id);
+    if (!node) continue;
+    updateDialogControl(node, c);
+    // Un control con estilo `tab N` solo se ve cuando la pestaña N está seleccionada.
+    const owner = c.styles.indexOf('tab');
+    if (c.type !== 'tab' && owner !== -1 && activeTab !== undefined && Number(c.styles[owner + 1]) !== activeTab) node.hidden = true;
+  }
+}
+
+function makeDialogControl(dname: string, c: DialogControlView): HTMLElement {
+  switch (c.type) {
+    case 'edit': {
+      const multi = c.styles.includes('multi');
+      const e = multi ? el('textarea') : el('input');
+      if (!multi && c.styles.includes('pass')) (e as HTMLInputElement).type = 'password';
+      if (c.styles.includes('read')) e.readOnly = true;
+      e.addEventListener('input', () => dialogSend(dname, 'edit', c.id, { text: e.value }));
+      return e;
+    }
+    case 'button': {
+      const b = el('button');
+      b.type = 'button';
+      if (c.styles.includes('default') || c.styles.includes('ok')) b.classList.add('primary');
+      b.addEventListener('click', () => dialogSend(dname, 'sclick', c.id));
+      return b;
+    }
+    case 'check':
+    case 'radio': {
+      const label = el('label');
+      const box = el('input');
+      box.type = c.type === 'check' ? 'checkbox' : 'radio';
+      box.addEventListener('change', () => dialogSend(dname, 'sclick', c.id, { checked: box.checked }));
+      label.append(box, el('span'));
+      return label;
+    }
+    case 'list': {
+      const sel = el('select');
+      sel.size = 4;
+      sel.addEventListener('change', () => dialogSend(dname, 'sclick', c.id, { sel: sel.selectedIndex + 1 }));
+      sel.addEventListener('dblclick', () => dialogSend(dname, 'dclick', c.id, { sel: sel.selectedIndex + 1 }));
+      return sel;
+    }
+    case 'combo': {
+      const sel = el('select');
+      sel.addEventListener('change', () => dialogSend(dname, 'sclick', c.id, { sel: sel.selectedIndex + 1 }));
+      return sel;
+    }
+    case 'box':
+      return el('fieldset');
+    case 'tab': {
+      const b = el('button');
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.addEventListener('click', () => dialogSend(dname, 'sclick', c.id));
+      return b;
+    }
+    default:
+      return el('div');
+  }
+}
+
+function updateDialogControl(node: HTMLElement, c: DialogControlView): void {
+  node.hidden = !c.visible;
+  const setDisabled = (e: Element) => ((e as HTMLInputElement).disabled = !c.enabled);
+  if (c.type === 'edit') {
+    const e = node as HTMLInputElement;
+    if (e.value !== c.text) e.value = c.text;
+    setDisabled(e);
+  } else if (c.type === 'tab') {
+    node.textContent = c.text.replace(/&/g, '');
+    node.classList.toggle('selected', c.checked);
+    node.setAttribute('aria-selected', String(c.checked));
+    setDisabled(node);
+  } else if (c.type === 'button') {
+    node.textContent = c.text.replace(/&/g, '');
+    setDisabled(node);
+  } else if (c.type === 'check' || c.type === 'radio') {
+    const box = node.querySelector('input')!;
+    box.checked = c.checked;
+    setDisabled(box);
+    node.querySelector('span')!.textContent = c.text.replace(/&/g, '');
+  } else if (c.type === 'list' || c.type === 'combo') {
+    const sel = node as HTMLSelectElement;
+    const current = [...sel.options].map((o) => o.textContent);
+    if (current.length !== c.lines.length || current.some((t, i) => t !== c.lines[i])) {
+      sel.replaceChildren(...c.lines.map((l) => el('option', '', l)));
+    }
+    sel.selectedIndex = c.sel - 1;
+    setDisabled(sel);
+  } else if (c.type === 'box') {
+    node.replaceChildren(el('legend', '', c.text));
+  } else node.textContent = c.text;
+}
+
 // ----------------------------------------------------------------- eventos
 
 function onUi(ev: UiEvent): void {
@@ -399,6 +643,7 @@ function onUi(ev: UiEvent): void {
         log.querySelector('.empty')?.remove();
         log.append(lineRow(b, ev.line));
         while (log.childElementCount > MAX_LINES) log.firstElementChild!.remove();
+        if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
         if (atBottom || ev.line.self) log.scrollTop = log.scrollHeight;
       }
       const counts = ['msg', 'action', 'notice'].includes(ev.line.kind) && !ev.line.self && !ev.line.history;
@@ -456,6 +701,13 @@ function onUi(ev: UiEvent): void {
       }
       break;
     }
+    case 'dialog':
+      syncDialog(ev.name, ev.view);
+      break;
+    case 'chanlist':
+      chanLists.set(ev.sid, ev.channels);
+      if (listSid === ev.sid) renderChanList();
+      break;
     case 'dcc':
       dccs.set(ev.dcc.id, ev.dcc);
       renderDcc();
@@ -565,6 +817,15 @@ input.addEventListener('input', () => {
 });
 $('input-form').addEventListener('submit', (e) => e.preventDefault());
 
+// Clic derecho en la conversación: popups de los scripts para canal, privado o estado.
+log.addEventListener('contextmenu', async (e) => {
+  if ((e.target as HTMLElement).closest('a, .nick')) return;
+  e.preventDefault();
+  const { clientX, clientY } = e;
+  const items = await scriptItems();
+  if (items.length) showMenu(clientX, clientY, items);
+});
+
 document.addEventListener('click', (e) => {
   const menu = $('context-menu');
   if (!menu.hidden && !menu.contains(e.target as Node) && !(e.target as HTMLElement).closest('.nick-row, .row .nick')) menu.hidden = true;
@@ -613,6 +874,7 @@ function fillConnect(n: Partial<NetworkConfig>): void {
   set('password', n.password ?? '');
   set('allowInvalidCert', n.allowInvalidCert ?? false);
   set('autoconnect', n.autoconnect ?? false);
+  (f.elements.namedItem('perform') as HTMLTextAreaElement).value = (n.perform ?? []).join('\n');
 }
 
 function renderSaved(): void {
@@ -638,7 +900,7 @@ function renderSaved(): void {
 }
 
 $('btn-connect').addEventListener('click', () => {
-  fillConnect({});
+  fillConnect(networks[0] ?? { name: 'RogerNet', host: 'irc.rogertp.es', autojoin: ['#general'] });
   renderSaved();
   dialog('dlg-connect').showModal();
 });
@@ -663,6 +925,7 @@ $('connect-form').addEventListener('submit', async () => {
     password: String(f.get('password') ?? '') || undefined,
     allowInvalidCert: f.has('allowInvalidCert'),
     autoconnect: f.has('autoconnect'),
+    perform: String(f.get('perform') ?? '').split('\n').map((l) => l.trim()).filter(Boolean),
   };
   if (f.has('save')) networks = [...networks.filter((n) => n.name !== cfg.name), cfg];
   await window.onda.invoke('connect', cfg, f.has('save'));
@@ -765,6 +1028,82 @@ $<HTMLTextAreaElement>('script-source').addEventListener('keydown', (e) => {
   }
 });
 
+// Búsqueda en la conversación (Ctrl+F)
+function applyFind(): void {
+  findQuery = $<HTMLInputElement>('find-input').value.trim().toLowerCase();
+  log.classList.toggle('finding', !!findQuery);
+  renderLog();
+  const b = activeBuffer();
+  $('find-count').textContent = findQuery && b ? `${b.lines.filter(matchesFind).length} coincidencias` : '';
+}
+function closeFind(): void {
+  $('find').hidden = true;
+  $<HTMLInputElement>('find-input').value = '';
+  applyFind();
+  input.focus();
+}
+$('find-input').addEventListener('input', applyFind);
+$('find-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeFind();
+});
+$('find-close').addEventListener('click', closeFind);
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    $('find').hidden = false;
+    $('find-input').focus();
+  }
+});
+
+// Lista de canales de la red
+const chanLists = new Map<string, ChannelListEntry[]>();
+let listSid = '';
+
+function renderChanList(): void {
+  const all = chanLists.get(listSid);
+  const out = $('list-results');
+  out.replaceChildren();
+  if (!all) {
+    $('list-status').textContent = 'Pidiendo la lista al servidor…';
+    return;
+  }
+  const q = $<HTMLInputElement>('list-filter').value.trim().toLowerCase();
+  const hits = q ? all.filter((c) => c.name.toLowerCase().includes(q) || c.topic.toLowerCase().includes(q)) : all;
+  $('list-status').textContent = `${hits.length} de ${all.length} canales${hits.length > 500 ? ' (se muestran los 500 con más usuarios)' : ''}. Pulsa uno para entrar.`;
+  for (const c of hits.slice(0, 500)) {
+    const row = el('button', 'chan-row');
+    row.type = 'button';
+    row.append(el('span', 'n', c.name), el('span', 'u', String(c.users)), el('span', 't', stripFormatting(c.topic)));
+    row.title = stripFormatting(c.topic);
+    row.addEventListener('click', () => {
+      void window.onda.invoke('input', listSid, STATUS, `/join ${c.name}`);
+      dialog('dlg-list').close();
+    });
+    out.append(row);
+  }
+}
+
+function requestChanList(): void {
+  chanLists.delete(listSid);
+  renderChanList();
+  void window.onda.invoke('input', listSid, STATUS, '/list');
+}
+
+$('btn-list').addEventListener('click', () => {
+  const s = sessions.get(active.sid);
+  if (!s || s.info.sid === LOCAL || s.info.state !== 'connected') {
+    send('/list'); // muestra el aviso de «No estás conectado» en la ventana activa
+    return;
+  }
+  listSid = s.info.sid;
+  dialog('dlg-list').showModal();
+  if (chanLists.has(listSid)) renderChanList();
+  else requestChanList();
+});
+$('list-refresh').addEventListener('click', requestChanList);
+$('list-filter').addEventListener('input', renderChanList);
+$('list-form').addEventListener('submit', (e) => e.preventDefault());
+
 // Transferencias y registros
 $('btn-dcc').addEventListener('click', () => {
   renderDcc();
@@ -801,7 +1140,7 @@ async function start(): Promise<void> {
   const now = Date.now();
   for (const text of [
     'Te damos la bienvenida a Onda IRC.',
-    'Pulsa «Conectar» o escribe /server irc.libera.chat para empezar. Con /help verás los comandos principales.',
+    'Pulsa «Conectar» o escribe /server RogerNet para empezar. Con /help verás los comandos principales.',
     'Tus scripts de mIRC (.mrc) se gestionan desde «Scripts».',
   ]) welcome.lines.push({ time: now, kind: 'info', text });
   local.buffers.set(STATUS, welcome);
@@ -813,6 +1152,8 @@ async function start(): Promise<void> {
       buf.nicks = b.nicks;
     }
   }
+  for (const w of snap.windows) getBuffer(LOCAL, w, 'custom');
+  for (const d of snap.dialogs) syncDialog(d.name, d);
   for (const d of snap.dccs) dccs.set(d.id, d);
   window.onda.onUi(onUi);
   activate(LOCAL, STATUS);

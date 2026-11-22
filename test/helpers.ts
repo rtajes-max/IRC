@@ -12,7 +12,7 @@ export async function startServer(port: number): Promise<ChildProcess> {
   const conf = path.join(dir, 'ngircd.conf');
   fs.writeFileSync(
     conf,
-    `[Global]\nName = irc.prueba.test\nInfo = Servidor de pruebas\nListen = 127.0.0.1\nPorts = ${port}\nPidFile = ${dir}/pid\nServerUID = ${process.getuid?.() ?? 0}\nServerGID = ${process.getgid?.() ?? 0}\n[Limits]\nMaxConnectionsIP = 0\nMaxNickLength = 20\n[Options]\nPAM = no\nIdent = no\nDNS = no\n`,
+    `[Global]\nName = irc.prueba.test\nInfo = Servidor de pruebas\nListen = 127.0.0.1\nPorts = ${port}\nPidFile = ${dir}/pid\nServerUID = ${process.getuid?.() ?? 0}\nServerGID = ${process.getgid?.() ?? 0}\n[Limits]\nMaxConnectionsIP = 0\nMaxNickLength = 10\n[Options]\nPAM = no\nIdent = no\nDNS = no\n`,
   );
   const proc = spawn('ngircd', ['-n', '-f', conf], { stdio: 'ignore' });
   for (let i = 0; i < 50; i++) {

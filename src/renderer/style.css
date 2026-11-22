@@ -289,3 +289,72 @@ input:not([type='checkbox']), select, textarea {
 @media (prefers-reduced-motion: no-preference) {
   .item, button { transition: background-color 0.12s, border-color 0.12s; }
 }
+
+.row .nick.relayed { cursor: default; }
+.net-tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.75em;
+  font-weight: 400;
+  vertical-align: 1px;
+}
+#context-menu .menu-title { padding: 5px 12px 2px; color: var(--muted); font-size: 0.86em; font-weight: 600; white-space: pre; }
+#context-menu button { white-space: pre; }
+
+.msl-dialog {
+  position: fixed;
+  z-index: 40;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+}
+.msl-dialog header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  user-select: none;
+  font-weight: 600;
+}
+.msl-dialog header .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msl-dialog header .x { border: 0; background: none; padding: 0 8px; font-size: 1.2em; line-height: 1.2; }
+.msl-dialog .body { position: relative; margin: 8px; font-size: 13px; }
+.msl-dialog .ctl { position: absolute; margin: 0; overflow: hidden; }
+.msl-dialog .ctl-text { line-height: 1.3; }
+.msl-dialog .ctl-button { padding: 0 6px; white-space: nowrap; }
+.msl-dialog .ctl-edit { padding: 2px 6px; }
+.msl-dialog textarea.ctl-edit { resize: none; overflow: auto; }
+.msl-dialog .ctl-check, .msl-dialog .ctl-radio { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.msl-dialog select.ctl { padding: 2px 4px; overflow: auto; }
+.msl-dialog fieldset.ctl { border: 1px solid var(--border); border-radius: 6px; padding: 0; pointer-events: none; }
+.msl-dialog fieldset.ctl legend { margin-left: 6px; padding: 0 4px; color: var(--muted); font-size: 0.9em; }
+
+#find { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+#find input { flex: 1; }
+#find-count { color: var(--muted); font-size: 0.86em; white-space: nowrap; }
+#find button { border: 0; background: none; font-size: 1.2em; padding: 0 6px; }
+#log.finding .row:not(.match) { display: none; }
+.grid label.full { grid-column: 1 / -1; }
+.grid textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+#list-form { display: flex; gap: 8px; margin-bottom: 8px; }
+#list-form input { flex: 1; }
+#list-results { max-height: 50vh; overflow-y: auto; margin-top: 8px; }
+.chan-row { display: flex; gap: 10px; width: 100%; padding: 4px 6px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: none; text-align: left; }
+.chan-row:hover { background: var(--panel-2); }
+.chan-row .n { flex: none; width: 34%; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chan-row .u { flex: none; width: 48px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chan-row .t { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.msl-dialog .tabs { display: flex; gap: 2px; overflow: visible; border-bottom: 1px solid var(--border); right: 0; }
+.msl-dialog .tabs .tab { border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: none; padding: 3px 10px; color: var(--muted); }
+.msl-dialog .tabs .tab.selected { background: var(--panel-2); border-color: var(--border); color: var(--text); font-weight: 600; }

@@ -213,8 +213,8 @@ on *:TEXT:*:?:{ msg $nick recibido en privado }`);
   });
 
   it('informa de construcciones no admitidas sin romper el resto', () => {
-    const s = engine.load('m.mrc', 'menu channel {\n  Saludar:msg $chan hola\n}\nalias ok { echo -a bien }');
-    expect(s.warnings.join(' ')).toMatch(/menu/);
+    const s = engine.load('m.mrc', 'cosarara sin sentido\nalias ok { echo -a bien }');
+    expect(s.warnings.join(' ')).toMatch(/no reconocida/);
     run('ok');
     expect(out).toEqual(['bien']);
   });
@@ -243,7 +243,275 @@ describe('temporizadores y archivos', () => {
     expect(out).toEqual(['2 segunda']);
     expect(run('write ../fuera.txt malo').error).toMatch(/ruta/);
     expect(fs.existsSync(path.join(dataDir, '..', 'fuera.txt'))).toBe(false);
-    run('echo -a [ $+ $read(/etc/passwd,1) $+ ]');
-    expect(out[out.length - 1]).toBe('[]');
+    run('echo -a ( $+ $read(/etc/passwd,1) $+ )');
+    expect(out[out.length - 1]).toBe('()');
+  });
+});
+
+describe('popups (menu)', () => {
+  const SRC = `menu nicklist {
+  Saludar a $1:msg $chan Hola, $1
+  -
+  Moderación
+  .Dar voz:mode $chan +v $1
+  .Expulsar:{
+    msg $chan Adiós, $snick
+    kick $chan $1 fuera
+  }
+  $iif($1 == Yo,Soy yo):echo -a yo
+  -
+}
+menu channel,status {
+  Canal $chan:echo -a en $chan
+  Vacío
+  .$null:noop
+}`;
+
+  it('construye el árbol evaluando etiquetas y ocultando lo vacío', () => {
+    const s = engine.load('p.mrc', SRC);
+    expect(s.warnings).toEqual([]);
+    const m = engine.menu('nicklist', newContext({ cid: 's1', chan: '#sala', params: ['ana'] }));
+    expect(m.map((e) => (e.separator ? '-' : e.label))).toEqual(['Saludar a ana', '-', 'Moderación']);
+    expect(m[2].children!.map((e) => e.label)).toEqual(['Dar voz', 'Expulsar']);
+    const mine = engine.menu('nicklist', newContext({ cid: 's1', chan: '#sala', params: ['Yo'] }));
+    expect(mine.map((e) => e.label)).toContain('Soy yo');
+    expect(engine.menu('channel', newContext({ cid: 's1', chan: '#sala' })).map((e) => e.label)).toEqual(['Canal #sala']);
+    expect(engine.menu('query', newContext({ cid: 's1' }))).toEqual([]);
+  });
+
+  it('ejecuta el comando del elemento elegido con el nick seleccionado', () => {
+    engine.load('p.mrc', SRC);
+    const ctx = () => newContext({ cid: 's1', chan: '#sala', params: ['ana'] });
+    const m = engine.menu('nicklist', ctx());
+    expect(engine.runMenu(m[0].id!, ctx())).toBe(true);
+    expect(engine.runMenu(m[2].children![1].id!, ctx())).toBe(true);
+    expect(cmds).toEqual(['msg #sala Hola, ana', 'msg #sala Adiós, ana', 'kick #sala ana fuera']);
+    expect(engine.runMenu('p.mrc\u00009\u00009', ctx())).toBe(false);
+  });
+});
+
+describe('goto y corchetes de evaluación', () => {
+  it('goto salta a etiquetas del mismo bloque y de bloques exteriores', () => {
+    engine.load('g.mrc', `alias cuenta {
+  var %i = 0
+  :otra
+  inc %i
+  if (%i < 4) { goto otra }
+  if ($1 == salta) goto fin
+  echo -a no saltó %i
+  :fin
+  echo -a fin %i
+}`);
+    run('cuenta');
+    run('cuenta salta');
+    expect(out).toEqual(['no saltó 4', 'fin 4', 'fin 4']);
+  });
+
+  it('goto a una etiqueta inexistente o en bucle infinito da error en vez de colgarse', () => {
+    engine.load('g.mrc', 'alias a { goto nada }\nalias b { :x | goto x }');
+    expect(run('a').error).toMatch(/etiqueta :nada/);
+    expect(run('b').error).toMatch(/goto/);
+  });
+
+  it('variables dinámicas con [ $+ [ ] ]', () => {
+    engine.load('v.mrc', `alias punto {
+  inc %puntos. [ $+ [ $1 ] ]
+  set %ultimo. [ $+ [ $1 ] ] $2-
+  echo -a $1 lleva %puntos. [ $+ [ $1 ] ] ( %ultimo. [ $+ [ $1 ] ] )
+}`);
+    run('punto ana gol de cabeza');
+    run('punto ana penalti');
+    run('punto luis falta');
+    expect(out).toEqual(['ana lleva 1 ( gol de cabeza )', 'ana lleva 2 ( penalti )', 'luis lleva 1 ( falta )']);
+    expect(engine.vars.get('puntos.ana')).toBe('2');
+  });
+
+  it('el valor de un corchete no se reevalúa', () => {
+    run('echo -a valor: [ $1- ] fin', { params: ['$me', '%x', '$calc(1+1)'] });
+    expect(out).toEqual(['valor: $me %x $calc(1+1) fin']);
+  });
+});
+
+describe('sockets', () => {
+  it('abre una conexión, escribe, lee línea a línea y recibe el cierre', async () => {
+    const net = await import('node:net');
+    const got: string[] = [];
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8');
+      sock.on('data', (d: string) => {
+        got.push(d);
+        sock.write('HTTP/1.0 200 OK\r\nX-Dato: 42\r\n\r\ncuerpo sin salto final');
+        sock.end();
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    engine.load('s.mrc', `alias pide { sockopen web 127.0.0.1 $1 }
+on *:SOCKOPEN:web:{
+  if ($sockerr > 0) { echo -a fallo | return }
+  sockwrite -n $sockname GET / HTTP/1.0
+}
+on *:SOCKREAD:web:{
+  var %l
+  sockread %l
+  if ($sockbr == 0) return
+  echo -a < $+ %l $+ >
+}
+on *:SOCKCLOSE:web:echo -a cerrado $sockname
+on *:SOCKOPEN:malo:echo -a error $sockerr`);
+    run(`pide ${port}`);
+    for (let i = 0; i < 200 && !out.includes('cerrado web'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(got).toEqual(['GET / HTTP/1.0\r\n']);
+    expect(out).toEqual(['<HTTP/1.0 200 OK>', '<X-Dato: 42>', '<>', '<cuerpo sin salto final>', 'cerrado web']);
+    expect(engine.socks.size).toBe(0);
+    srv.close();
+
+    run('sockopen malo 127.0.0.1 1');
+    for (let i = 0; i < 200 && !out.includes('error 3'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(out[out.length - 1]).toBe('error 3');
+  });
+});
+
+describe('diálogos', () => {
+  const SRC = `dialog saludo {
+  title "Enviar saludo"
+  size -1 -1 160 90
+  option dbu
+  text "Nombre:", 1, 5 5 40 10
+  edit "", 2, 50 4 100 12, autohs
+  check "En mayúsculas", 3, 5 22 80 10
+  radio "Formal", 4, 5 36 50 10, group
+  radio "Informal", 5, 60 36 50 10
+  list 6, 5 50 70 30
+  combo 7, 80 50 70 40, drop
+  button "Enviar", 10, 40 75 40 12, ok
+  button "Vaciar", 11, 90 75 40 12
+  icon 99, 1 1 1 1
+}
+on *:DIALOG:saludo:init:0:{
+  did -a saludo 6 uno
+  did -a saludo 6 dos
+  did -a saludo 6 tres
+  did -c saludo 6 2
+  did -c saludo 5
+  did -ra saludo 2 mundo
+}
+on *:DIALOG:saludo:sclick:10:{
+  var %n = $did(2)
+  if ($did(saludo,3).state == 1) %n = $upper(%n)
+  echo -a $iif($did(4).state == 1,Estimado,Hola) %n ( $+ $did(6) $+ / $+ $did(saludo,6).sel de $did(saludo,6).lines $+ )
+}
+on *:DIALOG:saludo:sclick:11:did -r saludo 2,6
+on *:DIALOG:saludo:edit:2:echo -a escribiendo $did(2)
+on *:DIALOG:saludo:close:*:echo -a cerrado $dname
+alias abre { dialog -m saludo saludo }`;
+
+  let views: (import('../src/core/msl/engine').DialogView | null)[];
+  beforeEach(() => {
+    views = [];
+    engine.host.dialogChanged = (_n, v) => views.push(v);
+  });
+  const last = () => views[views.length - 1]!;
+  const ctl = (id: number) => last().controls.find((c) => c.id === id)!;
+
+  it('abre el diálogo, ejecuta init y entrega la vista a la interfaz', () => {
+    const s = engine.load('d.mrc', SRC);
+    expect(s.warnings).toEqual(['Elemento de diálogo no admitido en "saludo": icon']);
+    run('abre');
+    expect(last()).toMatchObject({ name: 'saludo', title: 'Enviar saludo', w: 160, h: 90, dbu: true });
+    expect(last().controls.map((c) => c.type)).toEqual(['text', 'edit', 'check', 'radio', 'radio', 'list', 'combo', 'button', 'button']);
+    expect(ctl(6)).toMatchObject({ lines: ['uno', 'dos', 'tres'], sel: 2 });
+    expect(ctl(2).text).toBe('mundo');
+    expect(ctl(5).checked).toBe(true);
+    expect(ctl(10).styles).toContain('ok');
+    run('echo -a $dialog(saludo) $did(saludo,6,3) $did(saludo,1)');
+    expect(out).toEqual(['saludo tres Nombre:']);
+    run('abre');
+    expect(engine.dialogs.size).toBe(1);
+  });
+
+  it('las acciones del usuario actualizan el estado y disparan los eventos', () => {
+    engine.load('d.mrc', SRC);
+    run('abre');
+    engine.dialogEvent('saludo', 'edit', 2, { text: 'Ana' });
+    engine.dialogEvent('saludo', 'sclick', 3, { checked: true });
+    engine.dialogEvent('saludo', 'sclick', 4, { checked: true });
+    expect(ctl(4).checked).toBe(true);
+    expect(ctl(5).checked).toBe(false);
+    engine.dialogEvent('saludo', 'sclick', 6, { sel: 3 });
+    engine.dialogEvent('saludo', 'sclick', 10);
+    expect(out).toEqual(['escribiendo Ana', 'Estimado ANA (tres/3 de 3)', 'cerrado saludo']);
+    expect(last()).toBeNull();
+    expect(engine.dialogs.size).toBe(0);
+  });
+
+  it('/did vacía y desactiva controles, y cerrar desde la ventana dispara close', () => {
+    engine.load('d.mrc', SRC);
+    run('abre');
+    engine.dialogEvent('saludo', 'sclick', 11);
+    expect(ctl(2).text).toBe('');
+    expect(ctl(6).lines).toEqual([]);
+    run('did -b saludo 10');
+    expect(ctl(10).enabled).toBe(false);
+    engine.dialogEvent('saludo', 'sclick', 10);
+    expect(engine.dialogs.size).toBe(1);
+    engine.dialogEvent('saludo', 'close', 0);
+    expect(out).toEqual(['cerrado saludo']);
+    expect(run('dialog -m otro inexistente').error).toMatch(/tabla/);
+  });
+});
+
+describe('pestañas en diálogos y niveles de usuario', () => {
+  it('las pestañas se seleccionan de una en una y avisan al script', () => {
+    const views: (import('../src/core/msl/engine').DialogView | null)[] = [];
+    engine.host.dialogChanged = (_n, v) => views.push(v);
+    const s = engine.load('t.mrc', `dialog cfg {
+  title "Ajustes"
+  size -1 -1 200 100
+  tab "General", 1, 2 2 196 90
+  tab "Avanzado", 2
+  edit "", 10, 10 30 100 12, tab 1
+  check "Modo experto", 20, 10 30 100 12, tab 2
+}
+on *:DIALOG:cfg:sclick:1,2:echo -a pestaña $did
+alias abre { dialog -m cfg cfg }`);
+    expect(s.warnings).toEqual([]);
+    run('abre');
+    const tabs = () => views[views.length - 1]!.controls.filter((c) => c.type === 'tab').map((c) => c.checked);
+    expect(tabs()).toEqual([true, false]);
+    expect(views[views.length - 1]!.controls.find((c) => c.id === 20)!.styles).toEqual(['tab', '2']);
+    engine.dialogEvent('cfg', 'sclick', 2);
+    expect(tabs()).toEqual([false, true]);
+    run('did -c cfg 1');
+    expect(tabs()).toEqual([true, false]);
+    expect(out).toEqual(['pestaña 2']);
+  });
+
+  it('los eventos con nivel solo los disparan los usuarios autorizados', () => {
+    engine.load('n.mrc', `on 10:TEXT:!apagar:#:msg $chan apagando por orden de $nick (nivel $ulevel $+ )
+on =5:TEXT:!cinco:#:msg $chan solo nivel 5
+on amigo:TEXT:!hola:#:msg $chan hola, amigo $nick
+on 1:TEXT:!todos:#:msg $chan cualquiera puede`);
+    const say = (nick: string, text: string, address = 'u@host.test') =>
+      engine.fire('TEXT', { cid: 's1', nick, chan: '#sala', target: '#sala', address, text });
+    say('ana', '!apagar');
+    say('ana', '!todos');
+    expect(cmds).toEqual(['msg #sala cualquiera puede']);
+    run('auser 10 ana');
+    run('auser 5,amigo *!*@casa.test');
+    run('echo -a $level(ana) / $level(luis!x@casa.test) / $level(nadie)');
+    expect(out).toEqual(['10 / 5,amigo / 1']);
+    cmds.length = 0;
+    say('ana', '!apagar');
+    say('ana', '!cinco'); // nivel 10 no es exactamente 5
+    say('luis', '!cinco', 'x@casa.test');
+    say('luis', '!hola', 'x@casa.test');
+    say('luis', '!apagar', 'x@casa.test'); // nivel 5 no alcanza 10
+    say('ana', '!hola'); // no tiene el nivel «amigo»
+    expect(cmds).toEqual(['msg #sala apagando por orden de ana (nivel 10)', 'msg #sala solo nivel 5', 'msg #sala hola, amigo luis']);
+    run('ruser ana');
+    cmds.length = 0;
+    say('ana', '!apagar');
+    expect(cmds).toEqual([]);
   });
 });

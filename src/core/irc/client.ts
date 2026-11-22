@@ -68,10 +68,14 @@ export class IrcClient extends EventEmitter {
   private prefixModes = 'ov';
   private prefixChars = '@+';
   private queue: string[] = [];
-  private tokens = 6;
+  private tokens = 4;
   private drainTimer: NodeJS.Timeout | null = null;
   private nickAttempts = 0;
   private closedByUser = false;
+  private lastData = 0;
+  private keepalive: NodeJS.Timeout | null = null;
+  /** Segundos sin recibir nada tras los que la conexión se da por caída (se puede ajustar en pruebas). */
+  deadAfter = 240;
 
   constructor(public opts: IrcOptions) {
     super();
@@ -123,6 +127,14 @@ export class IrcClient extends EventEmitter {
       : net.connect({ host, port }, onConnect);
     this.socket = sock;
     sock.on('data', (d: Buffer) => this.onData(d));
+    // Vigilancia: si el servidor calla, se le pregunta; si sigue callado, la conexión se da por caída.
+    this.lastData = Date.now();
+    this.keepalive = setInterval(() => {
+      const idle = (Date.now() - this.lastData) / 1000;
+      if (idle > this.deadAfter) sock.destroy(new Error('el servidor ha dejado de responder'));
+      else if (this.registered && idle > this.deadAfter / 3) this.sendNow(`PING :onda${Date.now()}`);
+    }, Math.max(250, (this.deadAfter * 1000) / 8));
+    this.keepalive.unref();
     sock.on('error', (err: Error) => this.emit('error', err));
     sock.on('close', () => {
       const was = this.connected;
@@ -133,6 +145,8 @@ export class IrcClient extends EventEmitter {
       this.queue = [];
       if (this.drainTimer) clearInterval(this.drainTimer);
       this.drainTimer = null;
+      if (this.keepalive) clearInterval(this.keepalive);
+      this.keepalive = null;
       this.socket = null;
       this.emit('close', { wasConnected: was, byUser: this.closedByUser });
     });
@@ -160,7 +174,7 @@ export class IrcClient extends EventEmitter {
     if (!this.drainTimer) {
       this.drainTimer = setInterval(() => {
         if (this.queue.length) this.sendNow(this.queue.shift()!);
-        else if (this.tokens < 6) this.tokens++;
+        else if (this.tokens < 4) this.tokens++;
         else {
           clearInterval(this.drainTimer!);
           this.drainTimer = null;
@@ -264,6 +278,7 @@ export class IrcClient extends EventEmitter {
   // ------------------------------------------------------------- recepción
 
   private onData(d: Buffer): void {
+    this.lastData = Date.now();
     this.inbuf = this.inbuf.length ? Buffer.concat([this.inbuf, d]) : d;
     let idx: number;
     while ((idx = this.inbuf.indexOf(0x0a)) !== -1) {
@@ -374,7 +389,9 @@ export class IrcClient extends EventEmitter {
             this.emit('numeric', msg);
             return;
           }
-          this.nick = this.opts.nick + '_'.repeat(this.nickAttempts);
+          // 432 = nick no válido: en servidores con nicks cortos (9 caracteres) se prueba recortado.
+          const base = msg.command === '432' ? this.opts.nick.slice(0, 9 - this.nickAttempts + 1) : this.opts.nick;
+          this.nick = msg.command === '432' ? base : base + '_'.repeat(this.nickAttempts);
           this.sendNow(formatMessage('NICK', [this.nick]));
         }
         this.emit('numeric', msg);
