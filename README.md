@@ -31,7 +31,8 @@ variable de entorno `ONDA_SMOKE_PASSWORD` comprueba también la autenticación S
 
 Los instaladores de Windows (`.exe`), macOS (`.dmg`) y Linux (`.AppImage`) los genera el flujo «Instaladores» de GitHub Actions:
 al publicar una etiqueta `v*` se adjuntan a la versión, y también se puede lanzar a mano. No están firmados, así que
-Windows y macOS mostrarán un aviso la primera vez que se abran.
+Windows y macOS mostrarán un aviso la primera vez que se abran. Para Windows se genera además un `.zip` portátil: se
+descomprime y se ejecuta `Onda IRC.exe`, sin instalar nada.
 
 Dentro de la aplicación: «Conectar», o `/server RogerNet` (la red propia, `irc.rogertp.es:6697` con TLS, ya viene guardada y entra en `#general`). `/help` lista los comandos.
 Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -a $me`).

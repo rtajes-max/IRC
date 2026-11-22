@@ -33,7 +33,10 @@
       "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis",
+        "zip"
+      ]
     },
     "nsis": {
       "oneClick": false,
