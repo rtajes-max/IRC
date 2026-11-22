@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Onda IRC</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <span class="brand">Onda IRC</span>
+    <button id="btn-connect" class="primary">Conectar</button>
+    <button id="btn-scripts">Scripts</button>
+    <button id="btn-dcc">Transferencias <span id="dcc-badge" class="badge" hidden></span></button>
+    <button id="btn-logs">Registros</button>
+    <span class="spacer"></span>
+    <button id="btn-settings">Ajustes</button>
+  </header>
+  <div id="layout">
+    <nav id="tree" aria-label="Redes y canales"></nav>
+    <main id="chat">
+      <div id="topic"></div>
+      <div id="log" role="log" aria-live="polite"></div>
+      <div id="typing"></div>
+      <form id="input-form">
+        <span id="my-nick"></span>
+        <textarea id="input" rows="1" placeholder="Escribe un mensaje o un comando (/help)" autocomplete="off" spellcheck="true"></textarea>
+      </form>
+    </main>
+    <aside id="nicks" aria-label="Usuarios del canal"></aside>
+  </div>
+  <div id="context-menu" hidden></div>
+
+  <dialog id="dlg-connect">
+    <form method="dialog" id="connect-form">
+      <h2>Conectar a un servidor</h2>
+      <div id="saved-networks"></div>
+      <div class="grid">
+        <label>Nombre <input name="name" placeholder="Libera.Chat"></label>
+        <label>Servidor <input name="host" required placeholder="irc.libera.chat"></label>
+        <label>Puerto <input name="port" type="number" min="1" max="65535" value="6697" required></label>
+        <label class="check"><input name="tls" type="checkbox" checked> Conexión cifrada (TLS)</label>
+        <label>Nick <input name="nick" required></label>
+        <label>Canales al entrar <input name="autojoin" placeholder="#canal1, #canal2"></label>
+        <label>Cuenta (SASL) <input name="saslAccount" autocomplete="off"></label>
+        <label>Contraseña (SASL) <input name="saslPassword" type="password" autocomplete="off"></label>
+        <label>Contraseña del servidor <input name="password" type="password" autocomplete="off"></label>
+        <label class="check"><input name="allowInvalidCert" type="checkbox"> Aceptar certificados no válidos</label>
+        <label class="check"><input name="save" type="checkbox" checked> Guardar esta red</label>
+        <label class="check"><input name="autoconnect" type="checkbox"> Conectar al iniciar</label>
+      </div>
+      <p class="hint">Las contraseñas de las redes guardadas se almacenan sin cifrar en este equipo.</p>
+      <menu>
+        <button type="button" value="cancel" class="close">Cancelar</button>
+        <button type="submit" class="primary">Conectar</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-scripts" class="wide">
+    <h2>Scripts (compatibles con mIRC)</h2>
+    <div class="scripts">
+      <div class="script-list">
+        <div id="script-list"></div>
+        <button id="script-new">Nuevo script</button>
+      </div>
+      <div class="script-edit">
+        <input id="script-name" placeholder="nombre.mrc" aria-label="Nombre del script">
+        <textarea id="script-source" spellcheck="false" aria-label="Código del script"></textarea>
+        <div id="script-status"></div>
+      </div>
+    </div>
+    <menu>
+      <button id="script-delete" class="danger">Eliminar</button>
+      <span class="spacer"></span>
+      <button class="close">Cerrar</button>
+      <button id="script-save" class="primary">Guardar y cargar</button>
+    </menu>
+  </dialog>
+
+  <dialog id="dlg-dcc" class="wide">
+    <h2>Transferencias y chats DCC</h2>
+    <div id="dcc-list"></div>
+    <menu><button class="close">Cerrar</button></menu>
+  </dialog>
+
+  <dialog id="dlg-logs" class="wide">
+    <h2>Buscar en los registros</h2>
+    <form id="logs-form"><input id="logs-query" placeholder="Texto que buscar" aria-label="Texto que buscar"><button class="primary">Buscar</button></form>
+    <div id="logs-results"></div>
+    <menu><button class="close">Cerrar</button></menu>
+  </dialog>
+
+  <dialog id="dlg-settings">
+    <form method="dialog" id="settings-form">
+      <h2>Ajustes</h2>
+      <div class="grid">
+        <label>Nick por defecto <input name="nick" required></label>
+        <label>Nombre real <input name="realname"></label>
+        <label>Mensaje al salir <input name="quitMessage"></label>
+        <label>Tema
+          <select name="theme"><option value="dark">Oscuro</option><option value="light">Claro</option><option value="classic">Clásico</option></select>
+        </label>
+        <label>Tamaño de letra <input name="fontSize" type="number" min="10" max="24"></label>
+        <label class="check"><input name="showTimestamps" type="checkbox"> Mostrar la hora</label>
+        <label class="check"><input name="logging" type="checkbox"> Guardar registros de conversación</label>
+        <label class="check"><input name="notifications" type="checkbox"> Notificar las menciones</label>
+        <label class="check"><input name="sendTyping" type="checkbox"> Avisar de que estoy escribiendo</label>
+      </div>
+      <menu>
+        <button type="button" class="close">Cancelar</button>
+        <button type="submit" class="primary">Guardar</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

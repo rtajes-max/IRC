@@ -1,0 +1,21 @@
+{
+  "name": "onda-irc",
+  "version": "0.1.0",
+  "description": "Cliente IRC de escritorio moderno con scripting compatible con mIRC",
+  "private": true,
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^33.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
