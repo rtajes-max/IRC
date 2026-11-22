@@ -20,8 +20,8 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -40,7 +40,7 @@ jobs:
       - name: Subir el ejecutable sin firmar
         id: app-sin-firmar
         if: ${{ matrix.os == 'windows-latest' && github.event_name != 'pull_request' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: app-sin-firmar
           path: release/win-unpacked/Onda IRC.exe
@@ -66,7 +66,7 @@ jobs:
       - name: Subir el instalador sin firmar
         id: instalador-sin-firmar
         if: ${{ matrix.os == 'windows-latest' && github.event_name != 'pull_request' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: instalador-sin-firmar
           path: release/*.exe
@@ -88,7 +88,7 @@ jobs:
         shell: pwsh
         run: Copy-Item "release/firmado/*.exe" "release/" -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: onda-irc-${{ matrix.os }}
           path: |
