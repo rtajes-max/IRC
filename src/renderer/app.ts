@@ -254,6 +254,16 @@ function appendFormatted(parent: HTMLElement, text: string): void {
   }
 }
 
+const RELAY_NETWORKS: Record<string, string> = { tg: 'Telegram', wa: 'WhatsApp' };
+
+/** Los puentes (relaymsg) usan nicks «Nombre/red», p. ej. «Ana/tg» para Telegram. */
+function splitRelay(nick: string): { name: string; network: string } {
+  const i = nick.lastIndexOf('/');
+  if (i <= 0 || i === nick.length - 1) return { name: nick, network: '' };
+  const label = nick.slice(i + 1);
+  return { name: nick.slice(0, i), network: RELAY_NETWORKS[label.toLowerCase()] ?? label };
+}
+
 function lineRow(b: BufferState, line: Line): HTMLElement {
   const row = el('div', `row ${line.kind}`);
   if (line.highlight) row.classList.add('highlight');
@@ -264,13 +274,18 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
   time.title = d.toLocaleString();
   row.append(time);
   if (line.nick && (line.kind === 'msg' || line.kind === 'notice')) {
-    const nick = el('span', 'nick', (line.prefix ?? '') + line.nick);
+    const relay = splitRelay(line.nick);
+    const nick = el('span', 'nick', (line.prefix ?? '') + relay.name);
     nick.style.color = nickColor(line.nick);
-    nick.addEventListener('click', (e) => nickMenu(e.clientX, e.clientY, line.nick!));
+    if (relay.network) {
+      nick.classList.add('relayed');
+      nick.title = `${relay.name}, desde ${relay.network}`;
+      nick.append(el('span', 'net-tag', relay.network));
+    } else nick.addEventListener('click', (e) => nickMenu(e.clientX, e.clientY, line.nick!));
     row.append(nick);
   }
   const body = el('span', 'body');
-  if (line.kind === 'action') body.append(`* ${line.nick} `);
+  if (line.kind === 'action') body.append(`* ${splitRelay(line.nick ?? '').name} `);
   else if (line.kind !== 'msg' && line.kind !== 'notice' && line.kind !== 'echo') body.append('· ');
   appendFormatted(body, line.text);
   if (line.msgid) {
@@ -638,7 +653,7 @@ function renderSaved(): void {
 }
 
 $('btn-connect').addEventListener('click', () => {
-  fillConnect(networks[0] ?? { host: 'irc.rogertp.es' });
+  fillConnect(networks[0] ?? { name: 'RogerNet', host: 'irc.rogertp.es', autojoin: ['#general'] });
   renderSaved();
   dialog('dlg-connect').showModal();
 });
@@ -801,7 +816,7 @@ async function start(): Promise<void> {
   const now = Date.now();
   for (const text of [
     'Te damos la bienvenida a Onda IRC.',
-    'Pulsa «Conectar» o escribe /server irc.rogertp.es para empezar. Con /help verás los comandos principales.',
+    'Pulsa «Conectar» o escribe /server RogerNet para empezar. Con /help verás los comandos principales.',
     'Tus scripts de mIRC (.mrc) se gestionan desde «Scripts».',
   ]) welcome.lines.push({ time: now, kind: 'info', text });
   local.buffers.set(STATUS, welcome);

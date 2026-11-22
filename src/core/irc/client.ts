@@ -68,7 +68,7 @@ export class IrcClient extends EventEmitter {
   private prefixModes = 'ov';
   private prefixChars = '@+';
   private queue: string[] = [];
-  private tokens = 6;
+  private tokens = 4;
   private drainTimer: NodeJS.Timeout | null = null;
   private nickAttempts = 0;
   private closedByUser = false;
@@ -160,7 +160,7 @@ export class IrcClient extends EventEmitter {
     if (!this.drainTimer) {
       this.drainTimer = setInterval(() => {
         if (this.queue.length) this.sendNow(this.queue.shift()!);
-        else if (this.tokens < 6) this.tokens++;
+        else if (this.tokens < 4) this.tokens++;
         else {
           clearInterval(this.drainTimer!);
           this.drainTimer = null;

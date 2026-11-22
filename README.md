@@ -21,8 +21,16 @@ npm start        # compila y abre la aplicación
 npm test         # pruebas (las de integración usan ngircd si está instalado)
 ```
 
-Dentro de la aplicación: «Conectar», o `/server irc.rogertp.es` y `/join #canal`. `/help` lista los comandos.
+Dentro de la aplicación: «Conectar», o `/server RogerNet` (la red propia, `irc.rogertp.es:6697` con TLS, ya viene guardada y entra en `#general`). `/help` lista los comandos.
 Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -a $me`).
+
+## RogerNet (irc.rogertp.es)
+
+- Servidor Ergo; único puerto público: 6697 con TLS.
+- Cuentas: `/msg NickServ REGISTER contraseña` registra tu nick. Después rellena «Cuenta (SASL)» y «Contraseña (SASL)» en
+  «Conectar» para identificarte al entrar; un nick registrado exige autenticarse.
+- Los mensajes que llegan por el puente de Telegram usan nicks `Nombre/tg`; el cliente los muestra como «Nombre» con la etiqueta «Telegram».
+- El servidor oculta tu IP, pero un DCC es una conexión directa y la revela a la otra persona.
 
 ## Ejemplo de script
 

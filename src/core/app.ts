@@ -53,7 +53,9 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 /** Red preconfigurada en la primera ejecución. */
-export const DEFAULT_NETWORK: NetworkConfig = { name: 'irc.rogertp.es', host: 'irc.rogertp.es', port: 6697, tls: true, nick: '' };
+export const DEFAULT_NETWORK: NetworkConfig = {
+  name: 'RogerNet', host: 'irc.rogertp.es', port: 6697, tls: true, nick: '', autojoin: ['#general'],
+};
 
 export class AppCore extends EventEmitter implements MslHost {
   sessions = new Map<string, Session>();

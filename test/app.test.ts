@@ -79,8 +79,8 @@ describe('configuración inicial', () => {
   it('preconfigura la red propia en la primera ejecución y respeta la configuración guardada después', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-cfg-'));
     const first = new AppCore({ dataDir: dir });
-    expect(first.networks).toMatchObject([{ host: 'irc.rogertp.es', port: 6697, tls: true }]);
-    first.removeNetwork('irc.rogertp.es');
+    expect(first.networks).toMatchObject([{ name: 'RogerNet', host: 'irc.rogertp.es', port: 6697, tls: true, autojoin: ['#general'] }]);
+    first.removeNetwork('RogerNet');
     first.shutdown();
     const second = new AppCore({ dataDir: dir });
     expect(second.networks).toEqual([]);
@@ -90,9 +90,9 @@ describe('configuración inicial', () => {
   it('/server con el nombre de una red guardada usa su configuración', () => {
     const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-cfg-')) });
     app.on('ui', () => undefined);
-    app.input('local', STATUS, '/server irc.rogertp.es');
+    app.input('local', STATUS, '/server rogernet');
     const s = [...app.sessions.values()][0];
-    expect(s.cfg).toMatchObject({ host: 'irc.rogertp.es', port: 6697, tls: true });
+    expect(s.cfg).toMatchObject({ host: 'irc.rogertp.es', port: 6697, tls: true, autojoin: ['#general'] });
     s.client.on('error', () => undefined);
     app.closeSession(s.sid);
     app.shutdown();
