@@ -511,3 +511,7 @@ body.switch-bottom #switchbar { order: 5; border-bottom: 0; border-top: 1px soli
 #ignore-list { max-height: 45vh; overflow-y: auto; }
 .ign { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .ign span { flex: 1; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+
+/* En los temas claros el escritorio es algo más oscuro que las ventanas, para que se distingan. */
+:root[data-theme='light'] #desktop, :root[data-theme='classic'] #desktop { background: var(--panel-2); }
+:root[data-theme='light'] #sb-away, :root[data-theme='classic'] #sb-away { color: #a8650a; }

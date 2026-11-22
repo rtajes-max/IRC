@@ -13,7 +13,7 @@ function createWindow(): void {
     minWidth: 640,
     minHeight: 420,
     title: 'Onda IRC',
-    backgroundColor: '#14171c',
+    backgroundColor: '#ffffff',
     icon: path.join(__dirname, '..', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

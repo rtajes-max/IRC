@@ -53,7 +53,7 @@ const DEFAULT_SETTINGS: Settings = {
   username: 'onda',
   realname: 'Usuario de Onda IRC',
   quitMessage: 'Onda IRC',
-  theme: 'dark',
+  theme: 'light',
   layout: 'modern',
   fontSize: 14,
   showTimestamps: true,
