@@ -213,8 +213,8 @@ on *:TEXT:*:?:{ msg $nick recibido en privado }`);
   });
 
   it('informa de construcciones no admitidas sin romper el resto', () => {
-    const s = engine.load('m.mrc', 'menu channel {\n  Saludar:msg $chan hola\n}\nalias ok { echo -a bien }');
-    expect(s.warnings.join(' ')).toMatch(/menu/);
+    const s = engine.load('m.mrc', 'dialog cosa {\n  title "x"\n}\nalias ok { echo -a bien }');
+    expect(s.warnings.join(' ')).toMatch(/dialog/);
     run('ok');
     expect(out).toEqual(['bien']);
   });
@@ -245,5 +245,47 @@ describe('temporizadores y archivos', () => {
     expect(fs.existsSync(path.join(dataDir, '..', 'fuera.txt'))).toBe(false);
     run('echo -a [ $+ $read(/etc/passwd,1) $+ ]');
     expect(out[out.length - 1]).toBe('[]');
+  });
+});
+
+describe('popups (menu)', () => {
+  const SRC = `menu nicklist {
+  Saludar a $1:msg $chan Hola, $1
+  -
+  Moderación
+  .Dar voz:mode $chan +v $1
+  .Expulsar:{
+    msg $chan Adiós, $snick
+    kick $chan $1 fuera
+  }
+  $iif($1 == Yo,Soy yo):echo -a yo
+  -
+}
+menu channel,status {
+  Canal $chan:echo -a en $chan
+  Vacío
+  .$null:noop
+}`;
+
+  it('construye el árbol evaluando etiquetas y ocultando lo vacío', () => {
+    const s = engine.load('p.mrc', SRC);
+    expect(s.warnings).toEqual([]);
+    const m = engine.menu('nicklist', newContext({ cid: 's1', chan: '#sala', params: ['ana'] }));
+    expect(m.map((e) => (e.separator ? '-' : e.label))).toEqual(['Saludar a ana', '-', 'Moderación']);
+    expect(m[2].children!.map((e) => e.label)).toEqual(['Dar voz', 'Expulsar']);
+    const mine = engine.menu('nicklist', newContext({ cid: 's1', chan: '#sala', params: ['Yo'] }));
+    expect(mine.map((e) => e.label)).toContain('Soy yo');
+    expect(engine.menu('channel', newContext({ cid: 's1', chan: '#sala' })).map((e) => e.label)).toEqual(['Canal #sala']);
+    expect(engine.menu('query', newContext({ cid: 's1' }))).toEqual([]);
+  });
+
+  it('ejecuta el comando del elemento elegido con el nick seleccionado', () => {
+    engine.load('p.mrc', SRC);
+    const ctx = () => newContext({ cid: 's1', chan: '#sala', params: ['ana'] });
+    const m = engine.menu('nicklist', ctx());
+    expect(engine.runMenu(m[0].id!, ctx())).toBe(true);
+    expect(engine.runMenu(m[2].children![1].id!, ctx())).toBe(true);
+    expect(cmds).toEqual(['msg #sala Hola, ana', 'msg #sala Adiós, ana', 'kick #sala ana fuera']);
+    expect(engine.runMenu('p.mrc\u00009\u00009', ctx())).toBe(false);
   });
 });

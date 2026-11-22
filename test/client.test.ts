@@ -40,6 +40,15 @@ describe.skipIf(!hasNgircd)('IrcClient contra un servidor real (ngircd)', () => 
     expect(c.nick).toBe('ana_');
   });
 
+  it('recorta un nick demasiado largo para el servidor', async () => {
+    const c = new IrcClient({ host: '127.0.0.1', port: PORT, nick: 'nickdemasiadolargoparaelservidor' });
+    c.on('error', () => undefined);
+    c.connect();
+    await waitFor(() => c.registered, 'registro');
+    expect(c.nick).toBe('nickdemas');
+    c.disconnect();
+  });
+
   it('canales: entrar, lista de nicks, prefijos, mensajes, acciones, tema, modos, kick', async () => {
     const [ana, luis] = [clients[0], mk('luis')];
     const got: MessageEvent[] = [];

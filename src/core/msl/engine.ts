@@ -69,7 +69,28 @@ export interface Script {
   source: string;
   aliases: Map<string, AliasDef>;
   events: EventDef[];
+  menus: MenuDef[];
   warnings: string[];
+}
+
+interface MenuItemDef {
+  depth: number;
+  label: string;
+  separator: boolean;
+  body: Stmt[] | null;
+}
+
+interface MenuDef {
+  types: string[];
+  items: MenuItemDef[];
+}
+
+/** Elemento de un popup ya evaluado, listo para mostrarse. */
+export interface MenuEntry {
+  label: string;
+  id?: string;
+  separator?: boolean;
+  children?: MenuEntry[];
 }
 
 class ReturnSignal {
@@ -342,8 +363,44 @@ class BodyParser {
   }
 }
 
+/** Líneas de un popup: `Etiqueta:comando`, `.Subelemento:comando` (los puntos indican nivel) y `-` como separador. */
+function parseMenuItems(inner: string): MenuItemDef[] {
+  const items: MenuItemDef[] = [];
+  const lines = inner.split('\n');
+  for (let n = 0; n < lines.length; n++) {
+    let line = lines[n].trim();
+    if (!line) continue;
+    const dots = /^\.*/.exec(line)![0].length;
+    line = line.slice(dots).trim();
+    if (line === '-') {
+      items.push({ depth: dots, label: '', separator: true, body: null });
+      continue;
+    }
+    let depth = 0;
+    let colon = -1;
+    for (let k = 0; k < line.length; k++) {
+      if (line[k] === '(') depth++;
+      else if (line[k] === ')') depth--;
+      else if (line[k] === ':' && depth <= 0) {
+        colon = k;
+        break;
+      }
+    }
+    if (colon === -1) {
+      items.push({ depth: dots, label: line, separator: false, body: null });
+      continue;
+    }
+    let cmd = line.slice(colon + 1);
+    const balance = (t: string) => (t.match(/\{/g)?.length ?? 0) - (t.match(/\}/g)?.length ?? 0);
+    while (balance(cmd) > 0 && n + 1 < lines.length) cmd += '\n' + lines[++n];
+    const body = new BodyParser(cmd).parseBlock();
+    items.push({ depth: dots, label: line.slice(0, colon).trim(), separator: false, body: body.length ? body : null });
+  }
+  return items;
+}
+
 export function parseScript(name: string, source: string): Script {
-  const script: Script = { name, source, aliases: new Map(), events: [], warnings: [] };
+  const script: Script = { name, source, aliases: new Map(), events: [], menus: [], warnings: [] };
   // Quitar comentarios: bloques /* */ y líneas que empiezan por ;
   const src = source
     .replace(/\r/g, '')
@@ -446,7 +503,21 @@ export function parseScript(name: string, source: string): Script {
       const onlyMe = /^me:?/i.test(lvl);
       const notMe = lvl.startsWith('!');
       script.events.push({ event, level: lvl, pre, onlyMe, notMe, match: match.trim(), target: target.trim(), body: readBody() });
-    } else if (kw === 'menu' || kw === 'dialog') {
+    } else if (kw === 'menu') {
+      i += m[0].length;
+      const brace = src.indexOf('{', i);
+      const eol = src.indexOf('\n', i);
+      if (brace === -1 || (eol !== -1 && brace > eol)) {
+        script.warnings.push('Definición "menu" mal formada');
+        skipBlockOrLine();
+        continue;
+      }
+      const types = src.slice(i, brace).split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+      const end = findClose(src, brace, '{', '}');
+      const inner = src.slice(brace + 1, end === -1 ? src.length : end);
+      i = end === -1 ? src.length : end + 1;
+      script.menus.push({ types, items: parseMenuItems(inner) });
+    } else if (kw === 'dialog') {
       script.warnings.push(`"${kw}" todavía no está admitido; se ignora`);
       skipBlockOrLine();
     } else if (kw.startsWith('#')) {
@@ -503,6 +574,68 @@ export class MslEngine {
   dispose(): void {
     for (const t of this.timers.values()) clearInterval(t.handle);
     this.timers.clear();
+  }
+
+  /**
+   * Popups definidos por los scripts para un tipo de ventana (channel, nicklist, query, status, menubar).
+   * Las etiquetas se evalúan al abrir el menú; una etiqueta vacía oculta el elemento, como en mIRC.
+   */
+  menu(type: string, ctx: MslContext): MenuEntry[] {
+    const root: MenuEntry[] = [];
+    for (const script of this.scripts.values()) {
+      script.menus.forEach((def, mi) => {
+        if (!def.types.includes(type)) return;
+        const stack: { depth: number; list: MenuEntry[] }[] = [{ depth: -1, list: root }];
+        let hiddenDepth = Infinity;
+        def.items.forEach((item, ii) => {
+          if (item.depth > hiddenDepth) return;
+          hiddenDepth = Infinity;
+          while (stack.length > 1 && stack[stack.length - 1].depth >= item.depth) stack.pop();
+          const list = stack[stack.length - 1].list;
+          if (item.separator) {
+            if (list.length && !list[list.length - 1].separator) list.push({ label: '', separator: true });
+            return;
+          }
+          let label = '';
+          try {
+            label = this.evalText(item.label, newContext({ ...ctx, locals: new Map() }));
+          } catch {
+            label = '';
+          }
+          if (!label) {
+            hiddenDepth = item.depth;
+            return;
+          }
+          const entry: MenuEntry = { label };
+          if (item.body) entry.id = `${script.name}\u0000${mi}\u0000${ii}`;
+          else entry.children = [];
+          list.push(entry);
+          if (entry.children) stack.push({ depth: item.depth, list: entry.children });
+        });
+      });
+    }
+    const clean = (list: MenuEntry[]): MenuEntry[] =>
+      list
+        .map((e) => (e.children ? { ...e, children: clean(e.children) } : e))
+        .filter((e) => e.separator || e.id || (e.children && e.children.length))
+        .filter((e, k, arr) => !(e.separator && (k === arr.length - 1 || k === 0)));
+    return clean(root);
+  }
+
+  /** Ejecuta el comando de un elemento de popup devuelto por `menu()`. */
+  runMenu(id: string, ctx: MslContext): boolean {
+    const [name, mi, ii] = id.split('\u0000');
+    const item = this.scripts.get(name)?.menus[Number(mi)]?.items[Number(ii)];
+    if (!item?.body) return false;
+    this.loopBudget = MAX_LOOP;
+    try {
+      this.runStmts(item.body, ctx);
+    } catch (e) {
+      if (!(e instanceof HaltSignal || e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal)) {
+        this.host.echo(`* Error de script (menú): ${e instanceof Error ? e.message : String(e)}`, null, ctx, 's');
+      }
+    }
+    return true;
   }
 
   findAlias(name: string): AliasDef | undefined {
@@ -1178,6 +1311,7 @@ export class MslEngine {
       case 'address': return ctx.address ?? '';
       case 'site': return (ctx.address ?? '').split('@')[1] ?? '';
       case 'fulladdress': return ctx.nick && ctx.address ? `${ctx.nick}!${ctx.address}` : '';
+      case 'snick': return ctx.params[0] ?? '';
       case 'knick': return ctx.knick ?? '';
       case 'newnick': return ctx.newnick ?? '';
       case 'event': return (ctx.event ?? '').toLowerCase();

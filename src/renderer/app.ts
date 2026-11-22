@@ -168,7 +168,7 @@ function renderNicks(): void {
     row.addEventListener('dblclick', () => send(`/query ${n.nick}`));
     const menu = (e: MouseEvent) => {
       e.preventDefault();
-      nickMenu(e.clientX, e.clientY, n.nick);
+      void nickMenu(e.clientX, e.clientY, n.nick);
     };
     row.addEventListener('contextmenu', menu);
     row.addEventListener('click', menu);
@@ -176,8 +176,40 @@ function renderNicks(): void {
   }
 }
 
-function nickMenu(x: number, y: number, nick: string): void {
+interface ScriptMenuEntry {
+  label: string;
+  id?: string;
+  separator?: boolean;
+  children?: ScriptMenuEntry[];
+}
+
+/** Convierte los popups de los scripts en elementos de menú; los submenús se muestran sangrados bajo su título. */
+async function scriptItems(nick?: string): Promise<MenuItem[]> {
+  const { sid, buffer } = active;
+  let entries: ScriptMenuEntry[] = [];
+  try {
+    entries = await window.onda.invoke<ScriptMenuEntry[]>('menu:get', sid, buffer, nick);
+  } catch {
+    return [];
+  }
+  const out: MenuItem[] = [];
+  const walk = (list: ScriptMenuEntry[], depth: number) => {
+    for (const e of list) {
+      const pad = '\u2003'.repeat(depth);
+      if (e.separator) out.push(null);
+      else if (e.children) {
+        out.push([pad + e.label, null]);
+        walk(e.children, depth + 1);
+      } else if (e.id) out.push([pad + e.label, () => window.onda.invoke('menu:run', e.id, sid, buffer, nick)]);
+    }
+  };
+  walk(entries, 0);
+  return out;
+}
+
+async function nickMenu(x: number, y: number, nick: string): Promise<void> {
   const sid = active.sid;
+  const extra = await scriptItems(nick);
   const inChan = activeBuffer()?.type === 'channel';
   showMenu(x, y, [
     ['Conversación privada', () => send(`/query ${nick}`)],
@@ -195,10 +227,11 @@ function nickMenu(x: number, y: number, nick: string): void {
       : []),
     ['Enviar archivo…', () => window.onda.invoke('dcc:send', sid, nick)],
     ['Chat directo (DCC)', () => window.onda.invoke('dcc:chat', sid, nick)],
+    ...(extra.length ? [null, ...extra] : []),
   ]);
 }
 
-type MenuItem = [string, () => unknown] | null;
+type MenuItem = [string, (() => unknown) | null] | null;
 
 function showMenu(x: number, y: number, items: MenuItem[]): void {
   const menu = $('context-menu');
@@ -208,11 +241,16 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
       menu.append(el('hr'));
       continue;
     }
+    const action = it[1];
+    if (!action) {
+      menu.append(el('div', 'menu-title', it[0]));
+      continue;
+    }
     const b = el('button', '', it[0]);
     b.type = 'button';
     b.addEventListener('click', () => {
       menu.hidden = true;
-      void it[1]();
+      void action();
     });
     menu.append(b);
   }
@@ -281,7 +319,7 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
       nick.classList.add('relayed');
       nick.title = `${relay.name}, desde ${relay.network}`;
       nick.append(el('span', 'net-tag', relay.network));
-    } else nick.addEventListener('click', (e) => nickMenu(e.clientX, e.clientY, line.nick!));
+    } else nick.addEventListener('click', (e) => void nickMenu(e.clientX, e.clientY, line.nick!));
     row.append(nick);
   }
   const body = el('span', 'body');
@@ -579,6 +617,15 @@ input.addEventListener('input', () => {
   else notifyTyping('done');
 });
 $('input-form').addEventListener('submit', (e) => e.preventDefault());
+
+// Clic derecho en la conversación: popups de los scripts para canal, privado o estado.
+log.addEventListener('contextmenu', async (e) => {
+  if ((e.target as HTMLElement).closest('a, .nick')) return;
+  e.preventDefault();
+  const { clientX, clientY } = e;
+  const items = await scriptItems();
+  if (items.length) showMenu(clientX, clientY, items);
+});
 
 document.addEventListener('click', (e) => {
   const menu = $('context-menu');

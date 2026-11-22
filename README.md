@@ -19,7 +19,12 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 npm install
 npm start        # compila y abre la aplicación
 npm test         # pruebas (las de integración usan ngircd si está instalado)
+npm run dist     # genera el instalador del sistema en el que se ejecuta (carpeta release/)
 ```
+
+Los instaladores de Windows (`.exe`), macOS (`.dmg`) y Linux (`.AppImage`) los genera el flujo «Instaladores» de GitHub Actions:
+al publicar una etiqueta `v*` se adjuntan a la versión, y también se puede lanzar a mano. No están firmados, así que
+Windows y macOS mostrarán un aviso la primera vez que se abran.
 
 Dentro de la aplicación: «Conectar», o `/server RogerNet` (la red propia, `irc.rogertp.es:6697` con TLS, ya viene guardada y entra en `#general`). `/help` lista los comandos.
 Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -a $me`).
@@ -45,9 +50,9 @@ alias saluda { me saluda a $1 }
 ## Compatibilidad con el scripting de mIRC
 
 Admitido: `alias`, `on TEXT/ACTION/NOTICE/JOIN/PART/QUIT/NICK/KICK/TOPIC/MODE/CONNECT/DISCONNECT/INPUT/LOAD`, `raw`, `ctcp`,
-prefijos `^`, `!` y `me`, `var/set/unset/inc/dec`, `timer`, `hadd/hget…`, `write/$read`, `$regex`, `$calc`, `$gettok` y afines.
+prefijos `^`, `!` y `me`, popups `menu` (nicklist, channel, query, status), `var/set/unset/inc/dec`, `timer`, `hadd/hget…`, `write/$read`, `$regex`, `$calc`, `$gettok` y afines.
 
-Todavía no admitido: `menu` (popups), `dialog`, `goto`, corchetes de evaluación `[ ]`, niveles de usuario, sockets (`sockopen`),
+Todavía no admitido: `dialog`, `goto`, corchetes de evaluación `[ ]`, niveles de usuario, sockets (`sockopen`),
 ventanas personalizadas (`/window`) y COM/DLL. Al cargar un script se avisa de lo que se ha ignorado.
 
 Diferencias deliberadas, por seguridad: el texto recibido de la red nunca se reevalúa, los temporizadores no
@@ -55,7 +60,7 @@ reevalúan su comando al dispararse y `/write`, `$read` y similares solo acceden
 
 ## Pendiente
 
-- Instaladores para cada sistema (por ahora se ejecuta con `npm start`).
+- Firma de los instaladores e icono propio de la aplicación.
 - DCC pasivo/inverso (necesario detrás de algunos routers) y reanudación de transferencias.
 - Pasarelas a otras redes de mensajería (Telegram).
 - Las contraseñas de las redes guardadas se almacenan sin cifrar.

@@ -56,6 +56,9 @@ app.whenReady().then(() => {
   h('scripts:list', () => core.listScripts());
   h('scripts:save', (name: string, source: string) => core.saveScript(String(name), String(source)));
   h('scripts:delete', (name: string) => core.deleteScript(String(name)));
+  h('menu:get', (sid: string, buffer: string, nick?: string) => core.scriptMenu(String(sid), String(buffer), nick ? String(nick) : undefined));
+  h('menu:run', (id: string, sid: string, buffer: string, nick?: string) =>
+    core.runScriptMenu(String(id), String(sid), String(buffer), nick ? String(nick) : undefined));
   h('logs:search', (q: string) => core.searchLogs(String(q)));
   h('dcc:accept', (id: string) => core.dccAccept(id));
   h('dcc:reject', (id: string) => core.dccReject(id));

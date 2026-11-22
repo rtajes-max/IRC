@@ -10,7 +10,7 @@ import { IrcClient, MessageEvent } from './irc/client';
 import { stripFormatting } from './irc/formatting';
 import { IrcMessage, ircLower } from './irc/message';
 import { Logger } from './logs';
-import { MslContext, MslEngine, MslHost, newContext } from './msl/engine';
+import { MenuEntry, MslContext, MslEngine, MslHost, newContext } from './msl/engine';
 import {
   BufferType, DccInfo, LOCAL, Line, LineKind, NetworkConfig, NickEntry, STATUS, ScriptInfo, SessionInfo, Settings,
   Snapshot, UiEvent,
@@ -40,7 +40,7 @@ interface DccEntry {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  nick: 'usuario' + Math.floor(Math.random() * 9000 + 1000),
+  nick: 'onda' + Math.floor(Math.random() * 9000 + 1000),
   username: 'onda',
   realname: 'Usuario de Onda IRC',
   quitMessage: 'Onda IRC',
@@ -765,6 +765,24 @@ export class AppCore extends EventEmitter implements MslHost {
   }
 
   // ------------------------------------------------------------ scripts
+
+  private menuContext(sid: string, buffer: string, nick?: string): MslContext {
+    const ctx = this.ctxFor(sid, buffer);
+    if (nick) ctx.params = [nick];
+    else if (!ctx.chan && ctx.target) ctx.params = [ctx.target];
+    return ctx;
+  }
+
+  /** Popups de los scripts para la ventana indicada: nicklist si se pasa un nick; si no, según el tipo de búfer. */
+  scriptMenu(sid: string, buffer: string, nick?: string): MenuEntry[] {
+    const type = this.sessions.get(sid)?.buffers.get(ircLower(buffer))?.type;
+    const kind = nick ? 'nicklist' : type === 'channel' ? 'channel' : type === 'query' || type === 'dcc' ? 'query' : 'status';
+    return this.engine.menu(kind, this.menuContext(sid, buffer, nick));
+  }
+
+  runScriptMenu(id: string, sid: string, buffer: string, nick?: string): void {
+    this.engine.runMenu(String(id), this.menuContext(sid, buffer, nick));
+  }
 
   private loadScriptFile(file: string): ScriptInfo {
     const source = fs.readFileSync(path.join(this.scriptsDir, file), 'utf8');

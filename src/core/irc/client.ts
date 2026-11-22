@@ -374,7 +374,9 @@ export class IrcClient extends EventEmitter {
             this.emit('numeric', msg);
             return;
           }
-          this.nick = this.opts.nick + '_'.repeat(this.nickAttempts);
+          // 432 = nick no válido: en servidores con nicks cortos (9 caracteres) se prueba recortado.
+          const base = msg.command === '432' ? this.opts.nick.slice(0, 9 - this.nickAttempts + 1) : this.opts.nick;
+          this.nick = msg.command === '432' ? base : base + '_'.repeat(this.nickAttempts);
           this.sendNow(formatMessage('NICK', [this.nick]));
         }
         this.emit('numeric', msg);
