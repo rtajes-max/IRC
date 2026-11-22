@@ -78,7 +78,21 @@ temporizadores no reevalúan su comando al dispararse y `/write`, `$read` y simi
 
 ## Pendiente
 
-- Firma de los instaladores (requiere certificados de pago de Windows y Apple).
+- Firma de los instaladores: la de Windows está preparada con SignPath Foundation, pendiente de la solicitud ([docs/FIRMA.md](docs/FIRMA.md)); la de macOS requiere una cuenta de desarrollador de Apple.
+
+## Code signing policy
+
+Política de firma de código. La firma de los instaladores de Windows está solicitada a SignPath Foundation; los pasos
+están en [docs/FIRMA.md](docs/FIRMA.md).
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+- Committers and reviewers: [rtajes-max](https://github.com/rtajes-max)
+- Approvers: [rtajes-max](https://github.com/rtajes-max)
+
+Privacy policy: this program will not transfer any information to other networked systems unless specifically requested
+by the user or the person installing or operating it. It connects only to the IRC servers the user configures and,
+when the user starts or accepts a DCC transfer or chat, directly to the other participant.
 
 ## Estructura
 
