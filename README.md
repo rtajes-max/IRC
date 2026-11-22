@@ -82,8 +82,8 @@ temporizadores no reevalúan su comando al dispararse y `/write`, `$read` y simi
 
 ## Code signing policy
 
-Política de firma de código. La firma de los instaladores de Windows está solicitada a SignPath Foundation; los pasos
-están en [docs/FIRMA.md](docs/FIRMA.md).
+Política de firma de código. La firma de los instaladores de Windows se va a solicitar a SignPath Foundation; los pasos
+están en [docs/FIRMA.md](docs/FIRMA.md). Hasta que la acepten, los instaladores no están firmados.
 
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
