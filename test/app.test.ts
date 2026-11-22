@@ -344,6 +344,49 @@ describe('robustez de la conexión', () => {
   }, 15000);
 });
 
+describe('avisos de amigos (/notify)', () => {
+  it('pide MONITOR al conectar y al añadir, y muestra entradas y salidas', async () => {
+    const net = await import('node:net');
+    const got: string[] = [];
+    let sock: import('node:net').Socket | undefined;
+    const srv = net.createServer((s) => {
+      sock = s;
+      s.setEncoding('utf8');
+      s.on('error', () => undefined);
+      let buf = '';
+      s.on('data', (d: string) => {
+        buf += d;
+        let i: number;
+        while ((i = buf.indexOf('\r\n')) !== -1) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          got.push(line);
+          if (line.startsWith('USER ')) s.write(':srv 001 yo :Hola\r\n:srv 005 yo MONITOR=100 :son soportados\r\n:srv 376 yo :Fin del MOTD\r\n');
+        }
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-notify-')) });
+    const ev: UiEvent[] = [];
+    app.on('ui', (e: UiEvent) => ev.push(e));
+    app.updateSettings({ notify: ['ana'] });
+    const sid = app.connect({ name: 'L', host: '127.0.0.1', port, tls: false, nick: 'yo' });
+    await waitFor(() => got.includes('MONITOR + ana'), 'MONITOR al conectar');
+    app.input(sid, '*', '/notify Luis');
+    await waitFor(() => got.includes('MONITOR + Luis'), 'MONITOR al añadir');
+    sock!.write(':srv 730 yo :ana!u@h,Luis!u@h\r\n:srv 731 yo :ana\r\n');
+    const notes = () => ev.flatMap((e) => (e.type === 'line' ? [e.line.text] : []));
+    await waitFor(() => notes().includes('ana se ha desconectado'), 'avisos');
+    expect(notes()).toEqual(expect.arrayContaining(['ana está en línea', 'Luis está en línea', 'ana se ha desconectado']));
+    app.input(sid, '*', '/notify -r ana');
+    await waitFor(() => got.includes('MONITOR - ana'), 'MONITOR al quitar');
+    expect(app.settings.notify).toEqual(['Luis']);
+    app.shutdown();
+    srv.close();
+  });
+});
+
 describe('ventanas personalizadas', () => {
   it('/window, /aline, /echo @ventana, on INPUT y cierre', () => {
     const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-win-')) });
