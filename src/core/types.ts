@@ -48,7 +48,7 @@ export interface Line {
   msgid?: string;
 }
 
-export type BufferType = 'status' | 'channel' | 'query' | 'dcc';
+export type BufferType = 'status' | 'channel' | 'query' | 'dcc' | 'custom';
 
 export interface NickEntry {
   nick: string;
@@ -97,6 +97,8 @@ export interface Snapshot {
   settings: Settings;
   networks: NetworkConfig[];
   dccs: DccInfo[];
+  /** Ventanas personalizadas creadas por scripts (/window @nombre). */
+  windows: string[];
 }
 
 export interface ScriptInfo {

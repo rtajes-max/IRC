@@ -9,7 +9,8 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Scripts compatibles con mIRC** (`.mrc`): alias, eventos `on`, `raw`, `ctcp`, variables, `if/elseif/else`, `while`,
   temporizadores, tablas hash, tokens y los identificadores más habituales. Editor integrado en «Scripts».
 - **IRCv3**: TLS, autenticación SASL, hora del servidor, historial (`chathistory`), aviso de «está escribiendo» y reacciones.
-- **DCC**: envío y recepción de archivos y chat directo. Las ofertas entrantes nunca se aceptan solas.
+- **DCC**: envío y recepción de archivos (también DCC pasivo al recibir) y chat directo. Las ofertas entrantes nunca se aceptan solas.
+- **Contraseñas** de las redes guardadas cifradas con el almacén de claves del sistema, cuando está disponible.
 - **Registros** de conversación en texto plano, con buscador.
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
 
@@ -49,21 +50,26 @@ alias saluda { me saluda a $1 }
 
 ## Compatibilidad con el scripting de mIRC
 
-Admitido: `alias`, `on TEXT/ACTION/NOTICE/JOIN/PART/QUIT/NICK/KICK/TOPIC/MODE/CONNECT/DISCONNECT/INPUT/LOAD`, `raw`, `ctcp`,
-prefijos `^`, `!` y `me`, popups `menu` (nicklist, channel, query, status), `var/set/unset/inc/dec`, `timer`, `hadd/hget…`, `write/$read`, `$regex`, `$calc`, `$gettok` y afines.
+Admitido:
 
-Todavía no admitido: `dialog`, `goto`, corchetes de evaluación `[ ]`, niveles de usuario, sockets (`sockopen`),
-ventanas personalizadas (`/window`) y COM/DLL. Al cargar un script se avisa de lo que se ha ignorado.
+- `alias`, `on TEXT/ACTION/NOTICE/JOIN/PART/QUIT/NICK/KICK/TOPIC/MODE/CONNECT/DISCONNECT/INPUT/LOAD`, `raw`, `ctcp`, con prefijos `^`, `!` y `me`.
+- Popups `menu` (nicklist, channel, query, status) con submenús y separadores.
+- `var/set/unset/inc/dec`, variables dinámicas con corchetes (`%puntos. [ $+ [ $nick ] ]`), `if/elseif/else`, `while`, `goto`.
+- `timer`, tablas hash (`hadd`, `$hget`…), tokens (`$gettok`…), `$regex`, `$calc`, `write/$read`.
+- Sockets: `sockopen [-e]`, `sockwrite`, `sockread`, `sockclose` y los eventos `SOCKOPEN/SOCKREAD/SOCKCLOSE`.
+- Ventanas personalizadas: `/window @nombre`, `/aline`, `/echo @nombre` y `on INPUT` sobre ellas.
 
-Diferencias deliberadas, por seguridad: el texto recibido de la red nunca se reevalúa, los temporizadores no
-reevalúan su comando al dispararse y `/write`, `$read` y similares solo acceden a la carpeta de datos de scripts.
+No admitido: `dialog` (diálogos gráficos), niveles de usuario, ventanas con imágenes (`/window -p`, `/drawrect`…),
+sockets de escucha y UDP, y COM/DLL (propios de Windows). Al cargar un script se avisa de lo que se ha ignorado.
+
+Diferencias deliberadas, por seguridad: el texto recibido de la red nunca se reevalúa (tampoco dentro de `[ ]`), los
+temporizadores no reevalúan su comando al dispararse y `/write`, `$read` y similares solo acceden a la carpeta de datos de scripts.
 
 ## Pendiente
 
-- Firma de los instaladores e icono propio de la aplicación.
-- DCC pasivo/inverso (necesario detrás de algunos routers) y reanudación de transferencias.
-- Pasarelas a otras redes de mensajería (Telegram).
-- Las contraseñas de las redes guardadas se almacenan sin cifrar.
+- Firma de los instaladores (requiere certificados de pago de Windows y Apple).
+- Enviar por DCC pasivo y reanudar transferencias (recibir por DCC pasivo sí funciona).
+- Diálogos gráficos (`dialog`) de mIRC.
 
 ## Estructura
 

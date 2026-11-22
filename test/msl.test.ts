@@ -243,8 +243,8 @@ describe('temporizadores y archivos', () => {
     expect(out).toEqual(['2 segunda']);
     expect(run('write ../fuera.txt malo').error).toMatch(/ruta/);
     expect(fs.existsSync(path.join(dataDir, '..', 'fuera.txt'))).toBe(false);
-    run('echo -a [ $+ $read(/etc/passwd,1) $+ ]');
-    expect(out[out.length - 1]).toBe('[]');
+    run('echo -a ( $+ $read(/etc/passwd,1) $+ )');
+    expect(out[out.length - 1]).toBe('()');
   });
 });
 
@@ -287,5 +287,87 @@ menu channel,status {
     expect(engine.runMenu(m[2].children![1].id!, ctx())).toBe(true);
     expect(cmds).toEqual(['msg #sala Hola, ana', 'msg #sala Adiós, ana', 'kick #sala ana fuera']);
     expect(engine.runMenu('p.mrc\u00009\u00009', ctx())).toBe(false);
+  });
+});
+
+describe('goto y corchetes de evaluación', () => {
+  it('goto salta a etiquetas del mismo bloque y de bloques exteriores', () => {
+    engine.load('g.mrc', `alias cuenta {
+  var %i = 0
+  :otra
+  inc %i
+  if (%i < 4) { goto otra }
+  if ($1 == salta) goto fin
+  echo -a no saltó %i
+  :fin
+  echo -a fin %i
+}`);
+    run('cuenta');
+    run('cuenta salta');
+    expect(out).toEqual(['no saltó 4', 'fin 4', 'fin 4']);
+  });
+
+  it('goto a una etiqueta inexistente o en bucle infinito da error en vez de colgarse', () => {
+    engine.load('g.mrc', 'alias a { goto nada }\nalias b { :x | goto x }');
+    expect(run('a').error).toMatch(/etiqueta :nada/);
+    expect(run('b').error).toMatch(/goto/);
+  });
+
+  it('variables dinámicas con [ $+ [ ] ]', () => {
+    engine.load('v.mrc', `alias punto {
+  inc %puntos. [ $+ [ $1 ] ]
+  set %ultimo. [ $+ [ $1 ] ] $2-
+  echo -a $1 lleva %puntos. [ $+ [ $1 ] ] ( %ultimo. [ $+ [ $1 ] ] )
+}`);
+    run('punto ana gol de cabeza');
+    run('punto ana penalti');
+    run('punto luis falta');
+    expect(out).toEqual(['ana lleva 1 ( gol de cabeza )', 'ana lleva 2 ( penalti )', 'luis lleva 1 ( falta )']);
+    expect(engine.vars.get('puntos.ana')).toBe('2');
+  });
+
+  it('el valor de un corchete no se reevalúa', () => {
+    run('echo -a valor: [ $1- ] fin', { params: ['$me', '%x', '$calc(1+1)'] });
+    expect(out).toEqual(['valor: $me %x $calc(1+1) fin']);
+  });
+});
+
+describe('sockets', () => {
+  it('abre una conexión, escribe, lee línea a línea y recibe el cierre', async () => {
+    const net = await import('node:net');
+    const got: string[] = [];
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8');
+      sock.on('data', (d: string) => {
+        got.push(d);
+        sock.write('HTTP/1.0 200 OK\r\nX-Dato: 42\r\n\r\ncuerpo sin salto final');
+        sock.end();
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    engine.load('s.mrc', `alias pide { sockopen web 127.0.0.1 $1 }
+on *:SOCKOPEN:web:{
+  if ($sockerr > 0) { echo -a fallo | return }
+  sockwrite -n $sockname GET / HTTP/1.0
+}
+on *:SOCKREAD:web:{
+  var %l
+  sockread %l
+  if ($sockbr == 0) return
+  echo -a < $+ %l $+ >
+}
+on *:SOCKCLOSE:web:echo -a cerrado $sockname
+on *:SOCKOPEN:malo:echo -a error $sockerr`);
+    run(`pide ${port}`);
+    for (let i = 0; i < 200 && !out.includes('cerrado web'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(got).toEqual(['GET / HTTP/1.0\r\n']);
+    expect(out).toEqual(['<HTTP/1.0 200 OK>', '<X-Dato: 42>', '<>', '<cuerpo sin salto final>', 'cerrado web']);
+    expect(engine.socks.size).toBe(0);
+    srv.close();
+
+    run('sockopen malo 127.0.0.1 1');
+    for (let i = 0; i < 200 && !out.includes('error 3'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(out[out.length - 1]).toBe('error 3');
   });
 });

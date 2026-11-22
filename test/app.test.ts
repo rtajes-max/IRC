@@ -16,7 +16,9 @@ describe('DCC', () => {
     expect(intToIp(3232235777)).toBe('192.168.1.1');
     expect(parseDccOffer('SEND "mi foto.png" 3232235777 5000 1234')).toEqual({ type: 'SEND', filename: 'mi foto.png', ip: '192.168.1.1', port: 5000, size: 1234 });
     expect(parseDccOffer('CHAT chat 2130706433 4000')).toMatchObject({ type: 'CHAT', ip: '127.0.0.1', port: 4000 });
-    expect(parseDccOffer('SEND x 2130706433 0 10 99')).toBeNull();
+    expect(parseDccOffer('SEND x 2130706433 0 10 99')).toMatchObject({ port: 0, token: '99', size: 10 });
+    expect(parseDccOffer('SEND x 2130706433 0 10')).toBeNull();
+    expect(parseDccOffer('CHAT chat 2130706433 0 7')).toBeNull();
     expect(parseDccOffer('SEND x no-es-ip 80 10')).toBeNull();
   });
 
@@ -54,6 +56,25 @@ describe('DCC', () => {
     expect(path.basename(file)).toBe('origen (1).bin');
     expect(fs.readFileSync(file).equals(data)).toBe(true);
     expect(fs.readFileSync(path.join(dest, 'origen.bin'), 'utf8')).toBe('ya existía');
+  });
+
+  it('DCC pasivo: el receptor escucha y el remitente se conecta', async () => {
+    const net = await import('node:net');
+    const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-pasivo-'));
+    const data = Buffer.from('datos por dcc pasivo '.repeat(2000));
+    const recv = new DccReceive(parseDccOffer(`SEND "mi archivo.txt" 2130706433 0 ${data.length} 77`)!, dest);
+    const done = new Promise<string>((resolve, reject) => {
+      recv.on('done', resolve);
+      recv.on('error', reject);
+    });
+    const reply = await recv.listenPassive('127.0.0.1');
+    const m = /^SEND "mi archivo.txt" 2130706433 (\d+) (\d+) 77$/.exec(reply)!;
+    expect(Number(m[2])).toBe(data.length);
+    const sock = net.connect(Number(m[1]), '127.0.0.1', () => sock.write(data));
+    sock.on('data', () => undefined);
+    const file = await done;
+    expect(fs.readFileSync(file).equals(data)).toBe(true);
+    sock.destroy();
   });
 
   it('chat DCC en ambos sentidos', async () => {
@@ -95,6 +116,65 @@ describe('configuración inicial', () => {
     expect(s.cfg).toMatchObject({ host: 'irc.rogertp.es', port: 6697, tls: true, autojoin: ['#general'] });
     s.client.on('error', () => undefined);
     app.closeSession(s.sid);
+    app.shutdown();
+  });
+});
+
+describe('contraseñas guardadas', () => {
+  const codec = {
+    encrypt: (p: string) => Buffer.from(p.split('').reverse().join('')).toString('base64'),
+    decrypt: (c: string) => Buffer.from(c, 'base64').toString().split('').reverse().join(''),
+  };
+  const net = { name: 'Red', host: 'irc.ejemplo.test', port: 6697, tls: true, nick: 'yo', saslAccount: 'yo', saslPassword: 'sésamo', password: 'puerta' };
+
+  it('se cifran en disco y se recuperan al arrancar', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-sec-'));
+    const a = new AppCore({ dataDir: dir, secrets: codec });
+    a.saveNetwork(net);
+    a.shutdown();
+    const raw = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+    expect(raw).not.toContain('sésamo');
+    expect(raw).not.toContain('puerta');
+    expect(raw).toContain('enc:v1:');
+    const b = new AppCore({ dataDir: dir, secrets: codec });
+    expect(b.networks.find((n) => n.name === 'Red')).toMatchObject({ saslPassword: 'sésamo', password: 'puerta', saslAccount: 'yo' });
+    b.shutdown();
+    // Sin almacén de claves no se puede descifrar: la contraseña se descarta en vez de usarse cifrada.
+    const c = new AppCore({ dataDir: dir });
+    const lost = c.networks.find((n) => n.name === 'Red')!;
+    expect(lost.saslPassword).toBeUndefined();
+    expect(lost.saslAccount).toBe('yo');
+    c.shutdown();
+  });
+
+  it('sin almacén de claves se guardan en claro, como antes', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-sec-'));
+    const a = new AppCore({ dataDir: dir });
+    a.saveNetwork(net);
+    a.shutdown();
+    const b = new AppCore({ dataDir: dir });
+    expect(b.networks.find((n) => n.name === 'Red')!.saslPassword).toBe('sésamo');
+    b.shutdown();
+  });
+});
+
+describe('ventanas personalizadas', () => {
+  it('/window, /aline, /echo @ventana, on INPUT y cierre', () => {
+    const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-win-')) });
+    const ev: UiEvent[] = [];
+    app.on('ui', (e: UiEvent) => ev.push(e));
+    app.saveScript('w', 'alias panel { window @Panel | aline 4 @Panel primera | echo @panel segunda $1 }\non *:INPUT:@Panel:{ aline @Panel eco: $1- | halt }');
+    app.input('local', STATUS, '/panel hola');
+    expect(ev.some((e) => e.type === 'buffer:add' && e.sid === 'local' && e.buffer === '@Panel' && e.bufferType === 'custom')).toBe(true);
+    expect(app.snapshot().windows).toEqual(['@Panel']);
+    app.input('local', '@Panel', 'texto del usuario');
+    app.input('local', STATUS, '/aline @NoExiste x');
+    const lines = ev.flatMap((e) => (e.type === 'line' && e.buffer === '@Panel' ? [e.line.text] : []));
+    expect(lines).toEqual(['\x0304primera', 'segunda hola', 'eco: texto del usuario']);
+    expect(ev.some((e) => e.type === 'line' && e.line.kind === 'error' && e.line.text.includes('/aline'))).toBe(true);
+    app.closeBuffer('local', '@panel');
+    expect(ev.some((e) => e.type === 'buffer:remove' && e.buffer === '@Panel')).toBe(true);
+    expect(app.snapshot().windows).toEqual([]);
     app.shutdown();
   });
 });

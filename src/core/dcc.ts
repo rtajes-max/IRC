@@ -10,6 +10,8 @@ export interface DccOffer {
   ip: string;
   port: number;
   size: number;
+  /** DCC pasivo: el remitente no puede escuchar y pide que lo haga el receptor. */
+  token?: string;
 }
 
 export function ipToInt(ip: string): number {
@@ -22,14 +24,20 @@ export function intToIp(n: number): string {
 
 /** Interpreta los argumentos de un CTCP DCC, p. ej. `SEND "mi foto.png" 3232235777 5000 1234`. */
 export function parseDccOffer(args: string): DccOffer | null {
-  const m = /^(SEND|CHAT)\s+(?:"([^"]*)"|(\S+))\s+(\S+)\s+(\d+)(?:\s+(\d+))?/i.exec(args.trim());
+  const m = /^(SEND|CHAT)\s+(?:"([^"]*)"|(\S+))\s+(\S+)\s+(\d+)(?:\s+(\d+))?(?:\s+(\S+))?/i.exec(args.trim());
   if (!m) return null;
   const port = Number(m[5]);
-  if (port < 1 || port > 65535) return null; // DCC pasivo (puerto 0) no admitido
+  const type = m[1].toUpperCase() as DccOffer['type'];
+  const token = m[7];
+  if (port > 65535) return null;
+  // Puerto 0 = DCC pasivo: solo se admite para archivos y con su identificador.
+  if (port === 0 && (type !== 'SEND' || !token)) return null;
   const addr = m[4];
   const ip = /^\d+$/.test(addr) ? intToIp(Number(addr)) : addr;
   if (!net.isIP(ip)) return null;
-  return { type: m[1].toUpperCase() as DccOffer['type'], filename: safeFilename(m[2] ?? m[3] ?? ''), ip, port, size: Number(m[6] ?? 0) };
+  const offer: DccOffer = { type, filename: safeFilename(m[2] ?? m[3] ?? ''), ip, port, size: Number(m[6] ?? 0) };
+  if (port === 0) offer.token = token;
+  return offer;
 }
 
 /** Elimina rutas y caracteres peligrosos del nombre de archivo ofrecido por el remitente. */
@@ -51,6 +59,7 @@ export class DccReceive extends EventEmitter {
   received = 0;
   path = '';
   private socket: net.Socket | null = null;
+  private server: net.Server | null = null;
   private finished = false;
 
   constructor(public offer: DccOffer, private destDir: string) {
@@ -58,10 +67,41 @@ export class DccReceive extends EventEmitter {
   }
 
   start(): void {
+    this.attach(net.connect({ host: this.offer.ip, port: this.offer.port }));
+  }
+
+  /**
+   * DCC pasivo: escucha en un puerto local y devuelve los argumentos del CTCP DCC con los que
+   * se responde al remitente para que sea él quien se conecte.
+   */
+  listenPassive(localIp: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer((sock) => {
+        server.close();
+        clearTimeout(timeout);
+        this.attach(sock);
+      });
+      this.server = server;
+      const timeout = setTimeout(() => {
+        server.close();
+        if (!this.finished) {
+          this.finished = true;
+          this.emit('error', new Error('el remitente no se conectó'));
+        }
+      }, 120000);
+      timeout.unref();
+      server.on('error', reject);
+      server.listen(0, () => {
+        const name = this.offer.filename.includes(' ') ? `"${this.offer.filename}"` : this.offer.filename;
+        resolve(`SEND ${name} ${ipToInt(localIp)} ${(server.address() as net.AddressInfo).port} ${this.offer.size} ${this.offer.token}`);
+      });
+    });
+  }
+
+  private attach(sock: net.Socket): void {
     fs.mkdirSync(this.destDir, { recursive: true });
     this.path = uniquePath(this.destDir, this.offer.filename);
     const out = fs.createWriteStream(this.path);
-    const sock = net.connect({ host: this.offer.ip, port: this.offer.port });
     this.socket = sock;
     sock.setTimeout(60000, () => sock.destroy(new Error('tiempo de espera agotado')));
     const finish = (err?: Error) => {
@@ -88,6 +128,7 @@ export class DccReceive extends EventEmitter {
   }
 
   cancel(): void {
+    this.server?.close();
     this.socket?.destroy(new Error('cancelado'));
   }
 }

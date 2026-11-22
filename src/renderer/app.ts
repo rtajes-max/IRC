@@ -108,7 +108,7 @@ function renderTree(): void {
   tree.replaceChildren();
   for (const s of sessions.values()) {
     const net = el('div', 'net');
-    const order: BufferType[] = ['status', 'channel', 'query', 'dcc'];
+    const order: BufferType[] = ['status', 'channel', 'query', 'dcc', 'custom'];
     const list = [...s.buffers.values()].sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type) || a.name.localeCompare(b.name));
     for (const b of list) {
       const row = el('button', 'item' + (b.type === 'status' ? ' net-row' : ''));
@@ -122,7 +122,7 @@ function renderTree(): void {
       row.addEventListener('click', () => activate(s.info.sid, b.name));
       row.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        if (s.info.sid === LOCAL) return;
+        if (s.info.sid === LOCAL && b.type !== 'custom') return;
         showMenu(e.clientX, e.clientY, [
           [b.type === 'status' ? 'Desconectar y cerrar' : b.type === 'channel' ? 'Salir del canal' : 'Cerrar', () => window.onda.invoke('closeBuffer', s.info.sid, b.name)],
         ]);
@@ -875,6 +875,7 @@ async function start(): Promise<void> {
       buf.nicks = b.nicks;
     }
   }
+  for (const w of snap.windows) getBuffer(LOCAL, w, 'custom');
   for (const d of snap.dccs) dccs.set(d.id, d);
   window.onda.onUi(onUi);
   activate(LOCAL, STATUS);

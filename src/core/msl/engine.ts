@@ -6,6 +6,8 @@
  * El texto que llega de la red nunca se vuelve a evaluar (evita la inyección clásica de mIRC).
  */
 import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as tls from 'node:tls';
 import * as path from 'node:path';
 import { stripFormatting } from '../irc/formatting';
 import { ircLower } from '../irc/message';
@@ -21,6 +23,9 @@ export interface MslContext {
   numeric?: string;
   knick?: string;
   newnick?: string;
+  sockname?: string;
+  sockbr?: number;
+  sockerr?: number;
   params: string[];
   locals: Map<string, string>;
   aliasStack: string[];
@@ -99,9 +104,28 @@ class ReturnSignal {
 class HaltSignal {
   constructor(public haltdef = false) {}
 }
+class GotoSignal {
+  constructor(public label: string) {}
+}
 class BreakSignal {}
 class ContinueSignal {}
 export class MslError extends Error {}
+
+function errText(e: unknown): string {
+  if (e instanceof GotoSignal) return `no existe la etiqueta :${e.label}`;
+  return e instanceof Error ? e.message : String(e);
+}
+
+const PH_OPEN = '\uE000';
+const PH_CLOSE = '\uE001';
+
+interface ScriptSocket {
+  name: string;
+  socket: net.Socket;
+  buf: Buffer;
+  cid: string | null;
+  open: boolean;
+}
 
 const JOIN = Symbol('join');
 type Tok = string | typeof JOIN;
@@ -109,7 +133,7 @@ type Tok = string | typeof JOIN;
 const TWO_FIELD_EVENTS = new Set(['TEXT', 'ACTION', 'NOTICE', 'CTCP', 'CHAT']);
 const ONE_FIELD_EVENTS = new Set([
   'JOIN', 'PART', 'KICK', 'TOPIC', 'MODE', 'RAWMODE', 'OP', 'DEOP', 'VOICE', 'DEVOICE', 'BAN', 'UNBAN',
-  'INPUT', 'OPEN', 'CLOSE', 'INVITE', 'RAW',
+  'INPUT', 'OPEN', 'CLOSE', 'INVITE', 'RAW', 'SOCKOPEN', 'SOCKREAD', 'SOCKCLOSE',
 ]);
 
 const MAX_LOOP = 200000;
@@ -555,6 +579,8 @@ export class MslEngine {
   vars = new Map<string, string>();
   hashes = new Map<string, Map<string, string>>();
   timers = new Map<string, Timer>();
+  socks = new Map<string, ScriptSocket>();
+  private placeholders: string[] = [];
   onVarsChanged: (() => void) | null = null;
   private depth = 0;
   private loopBudget = MAX_LOOP;
@@ -574,6 +600,8 @@ export class MslEngine {
   dispose(): void {
     for (const t of this.timers.values()) clearInterval(t.handle);
     this.timers.clear();
+    for (const sk of this.socks.values()) sk.socket.destroy();
+    this.socks.clear();
   }
 
   /**
@@ -632,7 +660,7 @@ export class MslEngine {
       this.runStmts(item.body, ctx);
     } catch (e) {
       if (!(e instanceof HaltSignal || e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal)) {
-        this.host.echo(`* Error de script (menú): ${e instanceof Error ? e.message : String(e)}`, null, ctx, 's');
+        this.host.echo(`* Error de script (menú): ${errText(e)}`, null, ctx, 's');
       }
     }
     return true;
@@ -662,7 +690,7 @@ export class MslEngine {
     } catch (e) {
       if (e instanceof HaltSignal) return { halted: true };
       if (e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal) return { halted: false };
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errText(e);
       this.host.echo(`* Error de script: ${msg}`, null, ctx, 's');
       return { halted: true, error: msg };
     }
@@ -695,7 +723,7 @@ export class MslEngine {
         } catch (e) {
           if (e instanceof HaltSignal) haltdef = true;
           else if (!(e instanceof ReturnSignal || e instanceof BreakSignal || e instanceof ContinueSignal)) {
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = errText(e);
             this.host.echo(`* Error en ${script.name} (on ${event}): ${msg}`, null, ctx, 's');
           }
         }
@@ -709,6 +737,7 @@ export class MslEngine {
     if (event === 'RAW') return def.target === '*' || def.target === init.numeric || Number(def.target) === Number(init.numeric);
     if (!TWO_FIELD_EVENTS.has(event) && !ONE_FIELD_EVENTS.has(event)) return true;
     const t = def.target;
+    if (event.startsWith('SOCK')) return wildMatch(t || '*', init.sockname ?? '');
     if (t === '*' || t === '') return true;
     const chan = init.chan ?? '';
     if (t === '#') return !!chan;
@@ -734,6 +763,7 @@ export class MslEngine {
       return '';
     } catch (e) {
       if (e instanceof ReturnSignal) return e.value;
+      if (e instanceof GotoSignal) throw new MslError(errText(e));
       throw e;
     } finally {
       this.depth--;
@@ -743,28 +773,40 @@ export class MslEngine {
   // --------------------------------------------------------- ejecución
 
   private runStmts(stmts: Stmt[], ctx: MslContext): void {
-    for (const s of stmts) {
-      if (s.t === 'cmd') this.execCommand(s.text, ctx, true);
-      else if (s.t === 'if') {
-        let done = false;
-        for (const b of s.branches) {
-          if (this.evalCond(b.cond, ctx)) {
-            this.runStmts(b.body, ctx);
-            done = true;
-            break;
-          }
+    for (let idx = 0; idx < stmts.length; idx++) {
+      try {
+        this.runStmt(stmts[idx], ctx);
+      } catch (e) {
+        if (!(e instanceof GotoSignal)) throw e;
+        // goto: se busca la etiqueta `:nombre` en este bloque; si no está, se propaga al bloque exterior.
+        const want = ':' + e.label.toLowerCase();
+        const at = stmts.findIndex((st) => st.t === 'cmd' && st.text.trim().toLowerCase() === want);
+        if (at === -1) throw e;
+        if (--this.loopBudget <= 0) throw new MslError('demasiados saltos con goto (posible bucle infinito)');
+        idx = at;
+      }
+    }
+  }
+
+  private runStmt(s: Stmt, ctx: MslContext): void {
+    if (s.t === 'cmd') this.execCommand(s.text, ctx, true);
+    else if (s.t === 'if') {
+      for (const b of s.branches) {
+        if (this.evalCond(b.cond, ctx)) {
+          this.runStmts(b.body, ctx);
+          return;
         }
-        if (!done && s.otherwise) this.runStmts(s.otherwise, ctx);
-      } else {
-        while (this.evalCond(s.cond, ctx)) {
-          if (--this.loopBudget <= 0) throw new MslError('bucle while demasiado largo (posible bucle infinito)');
-          try {
-            this.runStmts(s.body, ctx);
-          } catch (e) {
-            if (e instanceof BreakSignal) break;
-            if (e instanceof ContinueSignal) continue;
-            throw e;
-          }
+      }
+      if (s.otherwise) this.runStmts(s.otherwise, ctx);
+    } else {
+      while (this.evalCond(s.cond, ctx)) {
+        if (--this.loopBudget <= 0) throw new MslError('bucle while demasiado largo (posible bucle infinito)');
+        try {
+          this.runStmts(s.body, ctx);
+        } catch (e) {
+          if (e instanceof BreakSignal) break;
+          if (e instanceof ContinueSignal) continue;
+          throw e;
         }
       }
     }
@@ -772,7 +814,8 @@ export class MslEngine {
 
   private execCommand(textIn: string, ctx: MslContext, evaluate: boolean): void {
     let text = textIn.trim().replace(/^\/+/, '');
-    if (!text || text.startsWith(':')) return; // etiquetas de goto: no admitidas
+    if (!text || text.startsWith(':')) return; // etiqueta de goto
+    if (evaluate && text.includes('[ ')) text = this.resolveBrackets(text, ctx);
     let noAlias = false;
     for (;;) {
       if (text.startsWith('.') && text.length > 1) text = text.slice(1);
@@ -809,7 +852,7 @@ export class MslEngine {
           if (!m) continue;
           const val = this.arith(ev(m[2]));
           if (global) this.setGlobal(m[1], val);
-          else ctx.locals.set(m[1].toLowerCase(), val);
+          else ctx.locals.set(this.expand(m[1]).toLowerCase(), val);
         }
         return;
       }
@@ -818,7 +861,7 @@ export class MslEngine {
         if (!m) return;
         const { name: vname, value } = this.dynName(m[3], m[4], ctx, evaluate);
         const val = this.arith(ev(value));
-        if (m[1]?.includes('l')) ctx.locals.set(vname.toLowerCase(), val);
+        if (m[1]?.includes('l')) ctx.locals.set(this.expand(vname).toLowerCase(), val);
         else this.setGlobal(vname, val);
         const unsetSecs = m[1]?.includes('u') && m[2] ? Number(m[2]) : 0;
         if (unsetSecs > 0) setTimeout(() => this.unsetGlobal(vname), unsetSecs * 1000).unref();
@@ -855,7 +898,26 @@ export class MslEngine {
       case 'continue':
         throw new ContinueSignal();
       case 'goto':
-        throw new MslError('goto no está admitido; usa while o if');
+        throw new GotoSignal(ev(rest).replace(/^:/, ''));
+      case 'sockread': {
+        const m = /^(?:-(\w+)\s+)?%(\S+)/.exec(rest);
+        const sk = this.socks.get((ctx.sockname ?? '').toLowerCase());
+        ctx.sockbr = 0;
+        if (!m || !sk) return;
+        let end = sk.buf.indexOf(0x0a);
+        let line: Buffer;
+        if (end === -1) {
+          if (!m[1]?.includes('f') || !sk.buf.length) return;
+          line = sk.buf;
+          sk.buf = Buffer.alloc(0);
+        } else {
+          line = sk.buf.subarray(0, end);
+          sk.buf = sk.buf.subarray(end + 1);
+        }
+        ctx.sockbr = line.length + (end === -1 ? 0 : 1);
+        this.setVar(m[2], line.toString('utf8').replace(/\r$/, ''), ctx, false);
+        return;
+      }
       case 'noop':
         ev(rest);
         return;
@@ -879,7 +941,7 @@ export class MslEngine {
       while (toks.length && /^-[A-Za-z]+$/.test(toks[0])) flags += toks.shift()!.slice(1);
       let body = ev(toks.join(' '));
       let target: string | null = null;
-      const first = /^([#&]\S*) (.+)$/s.exec(body);
+      const first = /^([#&@]\S*) (.+)$/s.exec(body);
       if (!/[as]/.test(flags) && first) {
         target = first[1];
         body = first[2];
@@ -899,6 +961,27 @@ export class MslEngine {
     }
 
     switch (name) {
+      case 'sockopen': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)\s+(\d+)/.exec(args);
+        if (!m) throw new MslError('uso: /sockopen [-e] nombre servidor puerto');
+        this.sockOpen(m[2], m[3], Number(m[4]), !!m[1]?.includes('e'), ctx);
+        return;
+      }
+      case 'sockwrite': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s?(.*)$/s.exec(args);
+        const sk = m && this.socks.get(m[2].toLowerCase());
+        if (!m || !sk) throw new MslError('socket no encontrado');
+        sk.socket.write(m[3] + (m[1]?.includes('n') ? '\r\n' : ''));
+        return;
+      }
+      case 'sockclose':
+        for (const [k, sk] of [...this.socks]) {
+          if (wildMatch(args.trim() || '*', k)) {
+            this.socks.delete(k);
+            sk.socket.destroy();
+          }
+        }
+        return;
       case 'hmake':
         this.hashes.set(args.replace(/^-\w+\s+/, '').split(' ')[0].toLowerCase(), new Map());
         return;
@@ -1026,23 +1109,23 @@ export class MslEngine {
   // --------------------------------------------------------- variables
 
   getVar(name: string, ctx: MslContext): string {
-    const k = name.toLowerCase();
+    const k = this.expand(name).toLowerCase();
     return ctx.locals.get(k) ?? this.vars.get(k) ?? '';
   }
 
   private setVar(name: string, value: string, ctx: MslContext, forceGlobal: boolean): void {
-    const k = name.toLowerCase();
+    const k = this.expand(name).toLowerCase();
     if (!forceGlobal && ctx.locals.has(k)) ctx.locals.set(k, value);
     else this.setGlobal(k, value);
   }
 
   private setGlobal(name: string, value: string): void {
-    this.vars.set(name.toLowerCase(), value);
+    this.vars.set(this.expand(name).toLowerCase(), value);
     this.onVarsChanged?.();
   }
 
   private unsetGlobal(name: string): void {
-    if (this.vars.delete(name.toLowerCase())) this.onVarsChanged?.();
+    if (this.vars.delete(this.expand(name).toLowerCase())) this.onVarsChanged?.();
   }
 
   private safePath(nameIn: string): string | null {
@@ -1181,7 +1264,83 @@ export class MslEngine {
   // -------------------------------------------------------- evaluación
 
   /** Sustituye variables e identificadores en un texto. Los valores sustituidos no se reevalúan. */
-  evalText(s: string, ctx: MslContext): string {
+  /** Sustituye los marcadores de corchetes ya evaluados por su valor. */
+  private expand(s: string): string {
+    if (!s.includes(PH_OPEN)) return s;
+    return s.replace(/\uE000(\d+)\uE001/g, (_m, id) => this.placeholders[Number(id)] ?? '');
+  }
+
+  /**
+   * Corchetes de evaluación de mIRC: `[ expr ]` se evalúa antes que el resto y `[ $+ expr ]` se pega
+   * a la palabra anterior, lo que permite variables dinámicas como `%puntos. [ $+ [ $nick ] ]`.
+   * El valor se inserta como texto literal: no se vuelve a evaluar.
+   */
+  private resolveBrackets(text: string, ctx: MslContext): string {
+    const toks = text.split(' ');
+    for (;;) {
+      const close = toks.indexOf(']');
+      if (close === -1) break;
+      const open = toks.lastIndexOf('[', close);
+      if (open === -1) break;
+      const inner = toks.slice(open + 1, close);
+      const glue = inner[0] === '$+';
+      const value = this.evalText((glue ? inner.slice(1) : inner).join(' '), ctx);
+      if (this.placeholders.length > 20000) this.placeholders = [];
+      const ph = `${PH_OPEN}${this.placeholders.push(value) - 1}${PH_CLOSE}`;
+      if (glue && open > 0) {
+        toks[open - 1] += ph;
+        toks.splice(open, close - open + 1);
+      } else toks.splice(open, close - open + 1, ph);
+    }
+    return toks.join(' ');
+  }
+
+  // ------------------------------------------------------------ sockets
+
+  private sockOpen(name: string, host: string, port: number, secure: boolean, ctx: MslContext): void {
+    const key = name.toLowerCase();
+    if (this.socks.has(key)) throw new MslError(`el socket "${name}" ya existe`);
+    const socket = secure ? tls.connect({ host, port, servername: net.isIP(host) ? undefined : host }) : net.connect({ host, port });
+    const sk: ScriptSocket = { name, socket, buf: Buffer.alloc(0), cid: ctx.cid, open: false };
+    this.socks.set(key, sk);
+    const alive = () => this.socks.get(key) === sk;
+    socket.setTimeout(60000, () => socket.destroy(new Error('tiempo de espera agotado')));
+    socket.on(secure ? 'secureConnect' : 'connect', () => {
+      sk.open = true;
+      socket.setTimeout(0);
+      if (alive()) this.fire('SOCKOPEN', { cid: sk.cid, sockname: name, sockerr: 0 });
+    });
+    socket.on('data', (d: Buffer) => {
+      if (!alive()) return;
+      sk.buf = Buffer.concat([sk.buf, d]);
+      if (sk.buf.length > 4 * 1024 * 1024) sk.buf = sk.buf.subarray(sk.buf.length - 1024 * 1024);
+      for (let n = 0; n < 100000 && alive() && sk.buf.length; n++) {
+        const before = sk.buf.length;
+        this.fire('SOCKREAD', { cid: sk.cid, sockname: name, sockerr: 0 });
+        if (sk.buf.length === before) break;
+      }
+    });
+    socket.on('error', () => {
+      if (alive() && !sk.open) this.fire('SOCKOPEN', { cid: sk.cid, sockname: name, sockerr: 3 });
+    });
+    socket.on('close', () => {
+      if (!alive()) return;
+      // Lo que quede sin salto de línea final se entrega antes de cerrar.
+      if (sk.buf.length) {
+        sk.buf = Buffer.concat([sk.buf, Buffer.from('\n')]);
+        for (let n = 0; n < 100000 && sk.buf.length; n++) {
+          const before = sk.buf.length;
+          this.fire('SOCKREAD', { cid: sk.cid, sockname: name, sockerr: 0 });
+          if (sk.buf.length === before) break;
+        }
+      }
+      this.socks.delete(key);
+      if (sk.open) this.fire('SOCKCLOSE', { cid: sk.cid, sockname: name, sockerr: 0 });
+    });
+  }
+
+  evalText(sIn: string, ctx: MslContext): string {
+    const s = sIn.includes('[ ') ? this.resolveBrackets(sIn, ctx) : sIn;
     const toks: Tok[] = [];
     const n = s.length;
     let i = 0;
@@ -1230,7 +1389,7 @@ export class MslEngine {
         merged.push(prev + next);
       } else merged.push(t);
     }
-    return merged.filter((t) => t !== '').join(' ');
+    return this.expand(merged.filter((t) => t !== '').join(' '));
   }
 
   private parseIdent(s: string, i: number, ctx: MslContext): { value: Tok; end: number } | null {
@@ -1313,6 +1472,10 @@ export class MslEngine {
       case 'fulladdress': return ctx.nick && ctx.address ? `${ctx.nick}!${ctx.address}` : '';
       case 'snick': return ctx.params[0] ?? '';
       case 'knick': return ctx.knick ?? '';
+      case 'sockname': return ctx.sockname ?? '';
+      case 'sockbr': return String(ctx.sockbr ?? 0);
+      case 'sockerr': return String(ctx.sockerr ?? 0);
+      case 'sock': return this.socks.get((a[0] ?? '').toLowerCase())?.name ?? '';
       case 'newnick': return ctx.newnick ?? '';
       case 'event': return (ctx.event ?? '').toLowerCase();
       case 'numeric': return ctx.numeric ?? '';

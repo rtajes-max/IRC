@@ -10,3 +10,4 @@ await build({ ...common, entryPoints: ['src/renderer/app.ts'], outfile: 'dist/re
 mkdirSync('dist/renderer', { recursive: true });
 cpSync('src/renderer/index.html', 'dist/renderer/index.html');
 cpSync('src/renderer/style.css', 'dist/renderer/style.css');
+cpSync('build/icon.png', 'dist/icon.png');

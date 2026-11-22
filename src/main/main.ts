@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain, shell } from 'electron';
+import { BrowserWindow, Menu, app, dialog, ipcMain, safeStorage, shell } from 'electron';
 import * as path from 'node:path';
 import { AppCore } from '../core/app';
 import type { NetworkConfig, Settings, UiEvent } from '../core/types';
@@ -14,6 +14,7 @@ function createWindow(): void {
     minHeight: 420,
     title: 'Onda IRC',
     backgroundColor: '#14171c',
+    icon: path.join(__dirname, '..', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -38,6 +39,13 @@ app.whenReady().then(() => {
     dataDir,
     downloadsDir: process.env.ONDA_DATA_DIR ? path.join(dataDir, 'descargas') : path.join(app.getPath('downloads'), 'Onda IRC'),
     version: `Onda IRC ${app.getVersion()}`,
+    // Las contraseñas guardadas se cifran con el almacén de claves del sistema cuando está disponible.
+    secrets: safeStorage.isEncryptionAvailable()
+      ? {
+          encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
+          decrypt: (cipher) => safeStorage.decryptString(Buffer.from(cipher, 'base64')),
+        }
+      : undefined,
   });
   core.on('ui', (ev: UiEvent) => win?.webContents.send('ui', ev));
 
