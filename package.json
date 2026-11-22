@@ -10,7 +10,8 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "dist": "npm run build && electron-builder --publish never"
+    "dist": "npm run build && electron-builder --publish never",
+    "smoke": "node scripts/build.mjs && node dist/smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

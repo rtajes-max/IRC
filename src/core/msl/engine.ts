@@ -26,6 +26,7 @@ export interface MslContext {
   sockname?: string;
   sockbr?: number;
   sockerr?: number;
+  ulevel?: string;
   dname?: string;
   devent?: string;
   did?: string;
@@ -84,7 +85,7 @@ export interface Script {
   warnings: string[];
 }
 
-export type DialogControlType = 'text' | 'edit' | 'button' | 'check' | 'radio' | 'list' | 'combo' | 'box';
+export type DialogControlType = 'text' | 'edit' | 'button' | 'check' | 'radio' | 'list' | 'combo' | 'box' | 'tab';
 
 interface DialogControlDef {
   type: DialogControlType;
@@ -433,7 +434,7 @@ class BodyParser {
   }
 }
 
-const DIALOG_CONTROLS = new Set(['text', 'edit', 'button', 'check', 'radio', 'list', 'combo', 'box']);
+const DIALOG_CONTROLS = new Set(['text', 'edit', 'button', 'check', 'radio', 'list', 'combo', 'box', 'tab']);
 
 /** Tabla de un diálogo: `title`, `size`, `option` y los controles (`text "x", id, x y w h, estilos`). */
 function parseDialog(name: string, inner: string, warnings: string[]): DialogDef {
@@ -453,8 +454,10 @@ function parseDialog(name: string, inner: string, warnings: string[]): DialogDef
       // El texto entre comillas es opcional (list y combo no lo llevan).
       const tm = /^"((?:[^"]|"")*)"\s*,\s*/.exec(rest);
       const parts = (tm ? rest.slice(tm[0].length) : rest).split(',').map((x) => x.trim());
-      const pos = (parts[1] ?? '').split(/\s+/).map(Number);
+      let pos = (parts[1] ?? '').split(/\s+/).map(Number);
       const id = Number(parts[0]);
+      // Las pestañas adicionales (`tab "Título", id`) no llevan coordenadas: comparten las de la primera.
+      if (kw === 'tab' && (pos.length < 4 || pos.some((v) => !Number.isFinite(v)))) pos = [0, 0, 0, 0];
       if (!Number.isFinite(id) || pos.length < 4 || pos.some((v) => !Number.isFinite(v))) {
         warnings.push(`Control de diálogo mal formado en "${name}": ${line.slice(0, 50)}`);
         continue;
@@ -677,6 +680,9 @@ export class MslEngine {
   hashes = new Map<string, Map<string, string>>();
   timers = new Map<string, Timer>();
   socks = new Map<string, ScriptSocket>();
+  /** Lista de usuarios con nivel de acceso (/auser): máscara o nick → niveles. */
+  users: { mask: string; levels: string[] }[] = [];
+  onUsersChanged: (() => void) | null = null;
   /** Diálogos abiertos, por nombre en minúsculas. */
   dialogs = new Map<string, DialogView>();
   private placeholders: string[] = [];
@@ -809,7 +815,9 @@ export class MslEngine {
         if (def.event !== event || def.pre !== pre) continue;
         if (def.onlyMe && !init.isMe) continue;
         if (def.notMe && init.isMe) continue;
-        const ctx = newContext({ ...init, event, params: text ? text.split(' ').filter(Boolean) : [] });
+        const ulevel = this.levelMatch(def.level, init.nick ?? '', init.address ?? '');
+        if (ulevel === null) continue;
+        const ctx = newContext({ ...init, event, ulevel, params: text ? text.split(' ').filter(Boolean) : [] });
         if (!this.matchTarget(def, event, init, ctx)) continue;
         if (TWO_FIELD_EVENTS.has(event) || event === 'RAW') {
           let pat = def.match;
@@ -1072,6 +1080,28 @@ export class MslEngine {
     }
 
     switch (name) {
+      case 'auser': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)/.exec(args);
+        if (!m) throw new MslError('uso: /auser [-a] niveles nick|máscara');
+        const levels = m[2].split(',').filter(Boolean);
+        const u = this.users.find((x) => x.mask.toLowerCase() === m[3].toLowerCase());
+        if (u) u.levels = m[1]?.includes('a') ? [...new Set([...u.levels, ...levels])] : levels;
+        else this.users.push({ mask: m[3], levels });
+        this.onUsersChanged?.();
+        return;
+      }
+      case 'ruser':
+      case 'rlevel': {
+        const t = args.split(' ').filter((x) => x && !x.startsWith('-'));
+        if (!t.length) return;
+        if (name === 'rlevel') this.users = this.users.filter((u) => !u.levels.some((l) => l.toLowerCase() === t[0].toLowerCase()));
+        else {
+          const mask = t[t.length - 1].toLowerCase();
+          this.users = this.users.filter((u) => u.mask.toLowerCase() !== mask);
+        }
+        this.onUsersChanged?.();
+        return;
+      }
       case 'dialog': {
         const m = /^-(\w+)\s+(\S+)\s*(.*)$/s.exec(args);
         if (!m) throw new MslError('uso: /dialog -m nombre tabla  ·  /dialog -x nombre');
@@ -1460,6 +1490,39 @@ export class MslEngine {
     return toks.join(' ');
   }
 
+  // ----------------------------------------------------- niveles de usuario
+
+  /** Niveles de un usuario según la lista de /auser; quien no está en ella tiene nivel 1. */
+  levelsOf(nick: string, address: string): string[] {
+    const full = `${nick}!${address || '*@*'}`;
+    const out: string[] = [];
+    for (const u of this.users) {
+      if (/[!@]/.test(u.mask) ? wildMatch(u.mask, full) : ircLower(u.mask) === ircLower(nick)) out.push(...u.levels);
+    }
+    return out.length ? out : ['1'];
+  }
+
+  /**
+   * ¿Puede este usuario disparar un evento del nivel indicado? Devuelve el nivel que coincide o null.
+   * `*` y `1` valen para todos; un nivel numérico lo cumplen ese nivel y los superiores (con `=`, solo ese);
+   * un nivel con nombre exige tenerlo.
+   */
+  private levelMatch(levelIn: string, nick: string, address: string): string | null {
+    let level = levelIn.replace(/^!/, '').replace(/^me:?/i, '').trim();
+    if (level === '' || level === '*') return this.levelsOf(nick, address)[0];
+    const exact = level.startsWith('=');
+    if (exact) level = level.slice(1);
+    const mine = this.levelsOf(nick, address);
+    for (const want of level.split(',')) {
+      const w = want.trim();
+      const hit = mine.find((m) =>
+        isNum(w) && isNum(m) ? (exact ? Number(m) === Number(w) : Number(m) >= Number(w)) : m.toLowerCase() === w.toLowerCase(),
+      );
+      if (hit !== undefined) return hit;
+    }
+    return null;
+  }
+
   // ----------------------------------------------------------- diálogos
 
   private dialogNotify(d: DialogView): void {
@@ -1476,6 +1539,8 @@ export class MslEngine {
       name, title: def.title, w: def.w, h: def.h, dbu: def.dbu,
       controls: def.controls.map((c) => ({ ...c, styles: [...c.styles], lines: [], sel: 0, checked: false, enabled: !c.styles.includes('disable'), visible: !c.styles.includes('hide') })),
     };
+    const firstTab = d.controls.find((c) => c.type === 'tab');
+    if (firstTab) firstTab.checked = true;
     this.dialogs.set(key, d);
     this.fire('DIALOG', { cid: ctx.cid, dname: name, devent: 'init', did: '0' });
     if (this.dialogs.get(key) === d) this.dialogNotify(d);
@@ -1491,6 +1556,7 @@ export class MslEngine {
 
   /** Marca una casilla; en los botones de opción desmarca los demás de su grupo. */
   private dialogCheck(d: DialogView, c: DialogControlView): void {
+    if (c.type === 'tab') for (const t of d.controls) if (t.type === 'tab') t.checked = false;
     if (c.type === 'radio') {
       const radios = d.controls.filter((x) => x.type === 'radio');
       const idx = radios.indexOf(c);
@@ -1520,11 +1586,12 @@ export class MslEngine {
       if (c.type === 'check') c.checked = value.checked;
       else if (c.type === 'radio' && value.checked) this.dialogCheck(d, c);
     }
+    if (c.type === 'tab' && event === 'sclick') this.dialogCheck(d, c);
     this.fire('DIALOG', { cid: null, dname: d.name, devent: event, did: String(id) });
     if (this.dialogs.get(key) !== d) return;
     // Los botones «ok» y «cancel» cierran el diálogo tras su evento, como en mIRC.
     if (c.type === 'button' && event === 'sclick' && (c.styles.includes('ok') || c.styles.includes('cancel'))) this.dialogClose(key, true);
-    else if (c.type === 'radio') this.dialogNotify(d);
+    else if (c.type === 'radio' || c.type === 'tab') this.dialogNotify(d);
   }
 
   // ------------------------------------------------------------ sockets
@@ -1704,6 +1771,12 @@ export class MslEngine {
       case 'fulladdress': return ctx.nick && ctx.address ? `${ctx.nick}!${ctx.address}` : '';
       case 'snick': return ctx.params[0] ?? '';
       case 'knick': return ctx.knick ?? '';
+      case 'ulevel': return ctx.ulevel ?? '';
+      case 'level': {
+        const who = a[0] ?? '';
+        const bang = who.indexOf('!');
+        return (bang === -1 ? this.levelsOf(who, '') : this.levelsOf(who.slice(0, bang), who.slice(bang + 1))).join(',');
+      }
       case 'dname': return ctx.dname ?? '';
       case 'devent': return ctx.devent ?? '';
       case 'dialog': return this.dialogs.get((a[0] ?? '').toLowerCase())?.name ?? '';

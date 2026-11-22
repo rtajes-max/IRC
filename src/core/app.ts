@@ -113,6 +113,8 @@ export class AppCore extends EventEmitter implements MslHost {
       }, 500);
       this.varsTimer.unref();
     };
+    this.engine.onUsersChanged = () =>
+      fs.writeFileSync(path.join(this.rootDir, 'users.json'), JSON.stringify(this.engine.users, null, 2));
     for (const file of fs.readdirSync(this.scriptsDir).sort()) {
       if (file.endsWith('.mrc')) this.engine.load(file, fs.readFileSync(path.join(this.scriptsDir, file), 'utf8'));
     }
@@ -134,6 +136,16 @@ export class AppCore extends EventEmitter implements MslHost {
       for (const [k, v] of Object.entries(vars)) this.engine.vars.set(k, String(v));
     } catch {
       /* sin variables guardadas */
+    }
+    try {
+      const users = JSON.parse(fs.readFileSync(path.join(this.rootDir, 'users.json'), 'utf8'));
+      if (Array.isArray(users)) {
+        this.engine.users = users
+          .filter((u) => u && typeof u.mask === 'string' && Array.isArray(u.levels))
+          .map((u) => ({ mask: u.mask, levels: u.levels.map(String) }));
+      }
+    } catch {
+      /* sin lista de usuarios */
     }
   }
 

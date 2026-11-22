@@ -354,3 +354,7 @@ input:not([type='checkbox']), select, textarea {
 .chan-row .n { flex: none; width: 34%; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chan-row .u { flex: none; width: 48px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .chan-row .t { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.msl-dialog .tabs { display: flex; gap: 2px; overflow: visible; border-bottom: 1px solid var(--border); right: 0; }
+.msl-dialog .tabs .tab { border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: none; padding: 3px 10px; color: var(--muted); }
+.msl-dialog .tabs .tab.selected { background: var(--panel-2); border-color: var(--border); color: var(--text); font-weight: 600; }

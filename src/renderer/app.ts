@@ -476,8 +476,23 @@ function syncDialog(name: string, view: DialogView | null): void {
     });
     entry = { root, controls: new Map() };
     openDialogs.set(k, entry);
+    let strip: HTMLElement | null = null;
     for (const c of view.controls) {
       const node = makeDialogControl(view.name, c);
+      if (c.type === 'tab') {
+        // Todas las pestañas comparten una tira situada donde indica la primera.
+        if (!strip) {
+          strip = el('div', 'ctl tabs');
+          strip.setAttribute('role', 'tablist');
+          strip.style.left = c.x * scale + 'px';
+          strip.style.top = c.y * scale + 'px';
+          body.append(strip);
+        }
+        node.classList.add('tab');
+        entry.controls.set(c.id, node);
+        strip.append(node);
+        continue;
+      }
       node.classList.add('ctl', 'ctl-' + c.type);
       node.style.left = c.x * scale + 'px';
       node.style.top = c.y * scale + 'px';
@@ -489,9 +504,14 @@ function syncDialog(name: string, view: DialogView | null): void {
     $('script-dialogs').append(root);
   }
   entry.root.querySelector('.title')!.textContent = view.title;
+  const activeTab = view.controls.find((c) => c.type === 'tab' && c.checked)?.id;
   for (const c of view.controls) {
     const node = entry.controls.get(c.id);
-    if (node) updateDialogControl(node, c);
+    if (!node) continue;
+    updateDialogControl(node, c);
+    // Un control con estilo `tab N` solo se ve cuando la pestaña N está seleccionada.
+    const owner = c.styles.indexOf('tab');
+    if (c.type !== 'tab' && owner !== -1 && activeTab !== undefined && Number(c.styles[owner + 1]) !== activeTab) node.hidden = true;
   }
 }
 
@@ -535,6 +555,13 @@ function makeDialogControl(dname: string, c: DialogControlView): HTMLElement {
     }
     case 'box':
       return el('fieldset');
+    case 'tab': {
+      const b = el('button');
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.addEventListener('click', () => dialogSend(dname, 'sclick', c.id));
+      return b;
+    }
     default:
       return el('div');
   }
@@ -547,6 +574,11 @@ function updateDialogControl(node: HTMLElement, c: DialogControlView): void {
     const e = node as HTMLInputElement;
     if (e.value !== c.text) e.value = c.text;
     setDisabled(e);
+  } else if (c.type === 'tab') {
+    node.textContent = c.text.replace(/&/g, '');
+    node.classList.toggle('selected', c.checked);
+    node.setAttribute('aria-selected', String(c.checked));
+    setDisabled(node);
   } else if (c.type === 'button') {
     node.textContent = c.text.replace(/&/g, '');
     setDisabled(node);
@@ -611,6 +643,7 @@ function onUi(ev: UiEvent): void {
         log.querySelector('.empty')?.remove();
         log.append(lineRow(b, ev.line));
         while (log.childElementCount > MAX_LINES) log.firstElementChild!.remove();
+        if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
         if (atBottom || ev.line.self) log.scrollTop = log.scrollHeight;
       }
       const counts = ['msg', 'action', 'notice'].includes(ev.line.kind) && !ev.line.self && !ev.line.history;

@@ -460,3 +460,58 @@ alias abre { dialog -m saludo saludo }`;
     expect(run('dialog -m otro inexistente').error).toMatch(/tabla/);
   });
 });
+
+describe('pestañas en diálogos y niveles de usuario', () => {
+  it('las pestañas se seleccionan de una en una y avisan al script', () => {
+    const views: (import('../src/core/msl/engine').DialogView | null)[] = [];
+    engine.host.dialogChanged = (_n, v) => views.push(v);
+    const s = engine.load('t.mrc', `dialog cfg {
+  title "Ajustes"
+  size -1 -1 200 100
+  tab "General", 1, 2 2 196 90
+  tab "Avanzado", 2
+  edit "", 10, 10 30 100 12, tab 1
+  check "Modo experto", 20, 10 30 100 12, tab 2
+}
+on *:DIALOG:cfg:sclick:1,2:echo -a pestaña $did
+alias abre { dialog -m cfg cfg }`);
+    expect(s.warnings).toEqual([]);
+    run('abre');
+    const tabs = () => views[views.length - 1]!.controls.filter((c) => c.type === 'tab').map((c) => c.checked);
+    expect(tabs()).toEqual([true, false]);
+    expect(views[views.length - 1]!.controls.find((c) => c.id === 20)!.styles).toEqual(['tab', '2']);
+    engine.dialogEvent('cfg', 'sclick', 2);
+    expect(tabs()).toEqual([false, true]);
+    run('did -c cfg 1');
+    expect(tabs()).toEqual([true, false]);
+    expect(out).toEqual(['pestaña 2']);
+  });
+
+  it('los eventos con nivel solo los disparan los usuarios autorizados', () => {
+    engine.load('n.mrc', `on 10:TEXT:!apagar:#:msg $chan apagando por orden de $nick (nivel $ulevel $+ )
+on =5:TEXT:!cinco:#:msg $chan solo nivel 5
+on amigo:TEXT:!hola:#:msg $chan hola, amigo $nick
+on 1:TEXT:!todos:#:msg $chan cualquiera puede`);
+    const say = (nick: string, text: string, address = 'u@host.test') =>
+      engine.fire('TEXT', { cid: 's1', nick, chan: '#sala', target: '#sala', address, text });
+    say('ana', '!apagar');
+    say('ana', '!todos');
+    expect(cmds).toEqual(['msg #sala cualquiera puede']);
+    run('auser 10 ana');
+    run('auser 5,amigo *!*@casa.test');
+    run('echo -a $level(ana) / $level(luis!x@casa.test) / $level(nadie)');
+    expect(out).toEqual(['10 / 5,amigo / 1']);
+    cmds.length = 0;
+    say('ana', '!apagar');
+    say('ana', '!cinco'); // nivel 10 no es exactamente 5
+    say('luis', '!cinco', 'x@casa.test');
+    say('luis', '!hola', 'x@casa.test');
+    say('luis', '!apagar', 'x@casa.test'); // nivel 5 no alcanza 10
+    say('ana', '!hola'); // no tiene el nivel «amigo»
+    expect(cmds).toEqual(['msg #sala apagando por orden de ana (nivel 10)', 'msg #sala solo nivel 5', 'msg #sala hola, amigo luis']);
+    run('ruser ana');
+    cmds.length = 0;
+    say('ana', '!apagar');
+    expect(cmds).toEqual([]);
+  });
+});

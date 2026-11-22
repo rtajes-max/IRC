@@ -23,7 +23,11 @@ npm install
 npm start        # compila y abre la aplicación
 npm test         # pruebas (las de integración usan ngircd si está instalado)
 npm run dist     # genera el instalador del sistema en el que se ejecuta (carpeta release/)
+npm run smoke    # prueba de humo contra irc.rogertp.es (conecta, entra en #onda-prueba, envía y sale)
 ```
+
+`npm run smoke -- servidor [puerto] [--plain] [--nick N] [--channel #c]` prueba otro servidor; con `--account cuenta` y la
+variable de entorno `ONDA_SMOKE_PASSWORD` comprueba también la autenticación SASL.
 
 Los instaladores de Windows (`.exe`), macOS (`.dmg`) y Linux (`.AppImage`) los genera el flujo «Instaladores» de GitHub Actions:
 al publicar una etiqueta `v*` se adjuntan a la versión, y también se puede lanzar a mano. No están firmados, así que
@@ -60,10 +64,12 @@ Admitido:
 - `timer`, tablas hash (`hadd`, `$hget`…), tokens (`$gettok`…), `$regex`, `$calc`, `write/$read`.
 - Sockets: `sockopen [-e]`, `sockwrite`, `sockread`, `sockclose` y los eventos `SOCKOPEN/SOCKREAD/SOCKCLOSE`.
 - Ventanas personalizadas: `/window @nombre`, `/aline`, `/echo @nombre` y `on INPUT` sobre ellas.
-- Diálogos: tablas `dialog` con `text`, `edit`, `button`, `check`, `radio`, `list`, `combo` y `box`; `/dialog -m/-x/-t`, `/did`,
+- Diálogos: tablas `dialog` con `text`, `edit`, `button`, `check`, `radio`, `list`, `combo`, `box` y `tab` (pestañas); `/dialog -m/-x/-t`, `/did`,
   `$did`, `$dialog` y `on DIALOG` (`init`, `sclick`, `dclick`, `edit`, `close`).
 
-No admitido: controles de diálogo `tab`, `icon`, `menu` y `scroll`, niveles de usuario, ventanas con imágenes (`/window -p`, `/drawrect`…),
+- Niveles de usuario: `/auser`, `/ruser`, `/rlevel`, `$level`, `$ulevel` y eventos con nivel (`on 10:TEXT`, `on =5:…`, `on amigo:…`).
+
+No admitido: controles de diálogo `icon`, `menu` y `scroll`, ventanas con imágenes (`/window -p`, `/drawrect`…),
 sockets de escucha y UDP, y COM/DLL (propios de Windows). Al cargar un script se avisa de lo que se ha ignorado.
 
 Diferencias deliberadas, por seguridad: el texto recibido de la red nunca se reevalúa (tampoco dentro de `[ ]`), los
