@@ -213,8 +213,8 @@ on *:TEXT:*:?:{ msg $nick recibido en privado }`);
   });
 
   it('informa de construcciones no admitidas sin romper el resto', () => {
-    const s = engine.load('m.mrc', 'dialog cosa {\n  title "x"\n}\nalias ok { echo -a bien }');
-    expect(s.warnings.join(' ')).toMatch(/dialog/);
+    const s = engine.load('m.mrc', 'cosarara sin sentido\nalias ok { echo -a bien }');
+    expect(s.warnings.join(' ')).toMatch(/no reconocida/);
     run('ok');
     expect(out).toEqual(['bien']);
   });
@@ -369,5 +369,94 @@ on *:SOCKOPEN:malo:echo -a error $sockerr`);
     run('sockopen malo 127.0.0.1 1');
     for (let i = 0; i < 200 && !out.includes('error 3'); i++) await new Promise((r) => setTimeout(r, 20));
     expect(out[out.length - 1]).toBe('error 3');
+  });
+});
+
+describe('diálogos', () => {
+  const SRC = `dialog saludo {
+  title "Enviar saludo"
+  size -1 -1 160 90
+  option dbu
+  text "Nombre:", 1, 5 5 40 10
+  edit "", 2, 50 4 100 12, autohs
+  check "En mayúsculas", 3, 5 22 80 10
+  radio "Formal", 4, 5 36 50 10, group
+  radio "Informal", 5, 60 36 50 10
+  list 6, 5 50 70 30
+  combo 7, 80 50 70 40, drop
+  button "Enviar", 10, 40 75 40 12, ok
+  button "Vaciar", 11, 90 75 40 12
+  icon 99, 1 1 1 1
+}
+on *:DIALOG:saludo:init:0:{
+  did -a saludo 6 uno
+  did -a saludo 6 dos
+  did -a saludo 6 tres
+  did -c saludo 6 2
+  did -c saludo 5
+  did -ra saludo 2 mundo
+}
+on *:DIALOG:saludo:sclick:10:{
+  var %n = $did(2)
+  if ($did(saludo,3).state == 1) %n = $upper(%n)
+  echo -a $iif($did(4).state == 1,Estimado,Hola) %n ( $+ $did(6) $+ / $+ $did(saludo,6).sel de $did(saludo,6).lines $+ )
+}
+on *:DIALOG:saludo:sclick:11:did -r saludo 2,6
+on *:DIALOG:saludo:edit:2:echo -a escribiendo $did(2)
+on *:DIALOG:saludo:close:*:echo -a cerrado $dname
+alias abre { dialog -m saludo saludo }`;
+
+  let views: (import('../src/core/msl/engine').DialogView | null)[];
+  beforeEach(() => {
+    views = [];
+    engine.host.dialogChanged = (_n, v) => views.push(v);
+  });
+  const last = () => views[views.length - 1]!;
+  const ctl = (id: number) => last().controls.find((c) => c.id === id)!;
+
+  it('abre el diálogo, ejecuta init y entrega la vista a la interfaz', () => {
+    const s = engine.load('d.mrc', SRC);
+    expect(s.warnings).toEqual(['Elemento de diálogo no admitido en "saludo": icon']);
+    run('abre');
+    expect(last()).toMatchObject({ name: 'saludo', title: 'Enviar saludo', w: 160, h: 90, dbu: true });
+    expect(last().controls.map((c) => c.type)).toEqual(['text', 'edit', 'check', 'radio', 'radio', 'list', 'combo', 'button', 'button']);
+    expect(ctl(6)).toMatchObject({ lines: ['uno', 'dos', 'tres'], sel: 2 });
+    expect(ctl(2).text).toBe('mundo');
+    expect(ctl(5).checked).toBe(true);
+    expect(ctl(10).styles).toContain('ok');
+    run('echo -a $dialog(saludo) $did(saludo,6,3) $did(saludo,1)');
+    expect(out).toEqual(['saludo tres Nombre:']);
+    run('abre');
+    expect(engine.dialogs.size).toBe(1);
+  });
+
+  it('las acciones del usuario actualizan el estado y disparan los eventos', () => {
+    engine.load('d.mrc', SRC);
+    run('abre');
+    engine.dialogEvent('saludo', 'edit', 2, { text: 'Ana' });
+    engine.dialogEvent('saludo', 'sclick', 3, { checked: true });
+    engine.dialogEvent('saludo', 'sclick', 4, { checked: true });
+    expect(ctl(4).checked).toBe(true);
+    expect(ctl(5).checked).toBe(false);
+    engine.dialogEvent('saludo', 'sclick', 6, { sel: 3 });
+    engine.dialogEvent('saludo', 'sclick', 10);
+    expect(out).toEqual(['escribiendo Ana', 'Estimado ANA (tres/3 de 3)', 'cerrado saludo']);
+    expect(last()).toBeNull();
+    expect(engine.dialogs.size).toBe(0);
+  });
+
+  it('/did vacía y desactiva controles, y cerrar desde la ventana dispara close', () => {
+    engine.load('d.mrc', SRC);
+    run('abre');
+    engine.dialogEvent('saludo', 'sclick', 11);
+    expect(ctl(2).text).toBe('');
+    expect(ctl(6).lines).toEqual([]);
+    run('did -b saludo 10');
+    expect(ctl(10).enabled).toBe(false);
+    engine.dialogEvent('saludo', 'sclick', 10);
+    expect(engine.dialogs.size).toBe(1);
+    engine.dialogEvent('saludo', 'close', 0);
+    expect(out).toEqual(['cerrado saludo']);
+    expect(run('dialog -m otro inexistente').error).toMatch(/tabla/);
   });
 });

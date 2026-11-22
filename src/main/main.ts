@@ -67,14 +67,16 @@ app.whenReady().then(() => {
   h('menu:get', (sid: string, buffer: string, nick?: string) => core.scriptMenu(String(sid), String(buffer), nick ? String(nick) : undefined));
   h('menu:run', (id: string, sid: string, buffer: string, nick?: string) =>
     core.runScriptMenu(String(id), String(sid), String(buffer), nick ? String(nick) : undefined));
+  h('dialog:event', (name: string, event: string, id: number, value?: { text?: string; checked?: boolean; sel?: number }) =>
+    core.dialogEvent(name, event, id, value));
   h('logs:search', (q: string) => core.searchLogs(String(q)));
   h('dcc:accept', (id: string) => core.dccAccept(id));
   h('dcc:reject', (id: string) => core.dccReject(id));
   h('dcc:chat', (sid: string, nick: string) => core.dccChat(sid, nick));
-  h('dcc:send', async (sid: string, nick: string) => {
+  h('dcc:send', async (sid: string, nick: string, passive?: boolean) => {
     if (!win) return;
     const r = await dialog.showOpenDialog(win, { title: `Enviar archivo a ${nick}`, properties: ['openFile'] });
-    if (!r.canceled && r.filePaths[0]) await core.dccSend(sid, nick, r.filePaths[0]);
+    if (!r.canceled && r.filePaths[0]) await core.dccSend(sid, nick, r.filePaths[0], passive === true);
   });
   h('dcc:reveal', (id: string) => {
     const d = core.snapshot().dccs.find((x) => x.id === id);

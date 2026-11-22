@@ -26,6 +26,9 @@ export interface MslContext {
   sockname?: string;
   sockbr?: number;
   sockerr?: number;
+  dname?: string;
+  devent?: string;
+  did?: string;
   params: string[];
   locals: Map<string, string>;
   aliasStack: string[];
@@ -45,6 +48,8 @@ export interface MslHost {
   nicks(ctx: MslContext, chan: string): { nick: string; prefix: string }[];
   /** Carpeta a la que se limitan /write, $read, etc. */
   dataDir: string;
+  /** Un diálogo de script se ha abierto, ha cambiado (vista nueva) o se ha cerrado (null). */
+  dialogChanged?(name: string, view: DialogView | null): void;
 }
 
 type Stmt =
@@ -75,7 +80,48 @@ export interface Script {
   aliases: Map<string, AliasDef>;
   events: EventDef[];
   menus: MenuDef[];
+  dialogs: Map<string, DialogDef>;
   warnings: string[];
+}
+
+export type DialogControlType = 'text' | 'edit' | 'button' | 'check' | 'radio' | 'list' | 'combo' | 'box';
+
+interface DialogControlDef {
+  type: DialogControlType;
+  id: number;
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  styles: string[];
+}
+
+interface DialogDef {
+  name: string;
+  title: string;
+  w: number;
+  h: number;
+  dbu: boolean;
+  controls: DialogControlDef[];
+}
+
+/** Estado de un control de diálogo, tal como lo ve la interfaz. */
+export interface DialogControlView extends DialogControlDef {
+  lines: string[];
+  sel: number;
+  checked: boolean;
+  enabled: boolean;
+  visible: boolean;
+}
+
+export interface DialogView {
+  name: string;
+  title: string;
+  w: number;
+  h: number;
+  dbu: boolean;
+  controls: DialogControlView[];
 }
 
 interface MenuItemDef {
@@ -387,6 +433,41 @@ class BodyParser {
   }
 }
 
+const DIALOG_CONTROLS = new Set(['text', 'edit', 'button', 'check', 'radio', 'list', 'combo', 'box']);
+
+/** Tabla de un diálogo: `title`, `size`, `option` y los controles (`text "x", id, x y w h, estilos`). */
+function parseDialog(name: string, inner: string, warnings: string[]): DialogDef {
+  const def: DialogDef = { name, title: name, w: 200, h: 120, dbu: false, controls: [] };
+  for (const raw of inner.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const kw = (/^\S+/.exec(line)?.[0] ?? '').toLowerCase();
+    const rest = line.slice(kw.length).trim();
+    if (kw === 'title') def.title = rest.replace(/^"(.*)"$/, '$1');
+    else if (kw === 'size') {
+      const n = rest.split(/\s+/).map(Number);
+      def.w = n[2] > 0 ? n[2] : def.w;
+      def.h = n[3] > 0 ? n[3] : def.h;
+    } else if (kw === 'option') def.dbu = /\bdbu\b/i.test(rest);
+    else if (DIALOG_CONTROLS.has(kw)) {
+      // El texto entre comillas es opcional (list y combo no lo llevan).
+      const tm = /^"((?:[^"]|"")*)"\s*,\s*/.exec(rest);
+      const parts = (tm ? rest.slice(tm[0].length) : rest).split(',').map((x) => x.trim());
+      const pos = (parts[1] ?? '').split(/\s+/).map(Number);
+      const id = Number(parts[0]);
+      if (!Number.isFinite(id) || pos.length < 4 || pos.some((v) => !Number.isFinite(v))) {
+        warnings.push(`Control de diálogo mal formado en "${name}": ${line.slice(0, 50)}`);
+        continue;
+      }
+      def.controls.push({
+        type: kw as DialogControlType, id, text: tm ? tm[1] : '', x: pos[0], y: pos[1], w: pos[2], h: pos[3],
+        styles: (parts[2] ?? '').toLowerCase().split(/\s+/).filter(Boolean),
+      });
+    } else warnings.push(`Elemento de diálogo no admitido en "${name}": ${kw}`);
+  }
+  return def;
+}
+
 /** Líneas de un popup: `Etiqueta:comando`, `.Subelemento:comando` (los puntos indican nivel) y `-` como separador. */
 function parseMenuItems(inner: string): MenuItemDef[] {
   const items: MenuItemDef[] = [];
@@ -424,7 +505,7 @@ function parseMenuItems(inner: string): MenuItemDef[] {
 }
 
 export function parseScript(name: string, source: string): Script {
-  const script: Script = { name, source, aliases: new Map(), events: [], menus: [], warnings: [] };
+  const script: Script = { name, source, aliases: new Map(), events: [], menus: [], dialogs: new Map(), warnings: [] };
   // Quitar comentarios: bloques /* */ y líneas que empiezan por ;
   const src = source
     .replace(/\r/g, '')
@@ -511,6 +592,11 @@ export function parseScript(name: string, source: string): Script {
           match = readField() ?? '*';
           target = readField() ?? '*';
         } else if (ONE_FIELD_EVENTS.has(event)) target = readField() ?? '*';
+        else if (event === 'DIALOG') {
+          // on *:DIALOG:nombre:evento:ids:
+          target = readField() ?? '*';
+          match = `${readField() ?? '*'}:${readField() ?? '*'}`;
+        }
       } else if (kw === 'ctcp') {
         event = 'CTCP';
         match = readField() ?? '*';
@@ -542,8 +628,19 @@ export function parseScript(name: string, source: string): Script {
       i = end === -1 ? src.length : end + 1;
       script.menus.push({ types, items: parseMenuItems(inner) });
     } else if (kw === 'dialog') {
-      script.warnings.push(`"${kw}" todavía no está admitido; se ignora`);
-      skipBlockOrLine();
+      i += m[0].length;
+      const brace = src.indexOf('{', i);
+      const eol = src.indexOf('\n', i);
+      if (brace === -1 || (eol !== -1 && brace > eol)) {
+        script.warnings.push('Definición "dialog" mal formada');
+        skipBlockOrLine();
+        continue;
+      }
+      const dname = src.slice(i, brace).replace(/^-\w+\s+/, '').trim();
+      const end = findClose(src, brace, '{', '}');
+      const inner = src.slice(brace + 1, end === -1 ? src.length : end);
+      i = end === -1 ? src.length : end + 1;
+      if (dname) script.dialogs.set(dname.toLowerCase(), parseDialog(dname, inner, script.warnings));
     } else if (kw.startsWith('#')) {
       // #grupo on/off … #grupo end: se tratan como siempre activos
       const eol = src.indexOf('\n', i);
@@ -580,6 +677,8 @@ export class MslEngine {
   hashes = new Map<string, Map<string, string>>();
   timers = new Map<string, Timer>();
   socks = new Map<string, ScriptSocket>();
+  /** Diálogos abiertos, por nombre en minúsculas. */
+  dialogs = new Map<string, DialogView>();
   private placeholders: string[] = [];
   onVarsChanged: (() => void) | null = null;
   private depth = 0;
@@ -600,6 +699,7 @@ export class MslEngine {
   dispose(): void {
     for (const t of this.timers.values()) clearInterval(t.handle);
     this.timers.clear();
+    this.dialogs.clear();
     for (const sk of this.socks.values()) sk.socket.destroy();
     this.socks.clear();
   }
@@ -735,6 +835,17 @@ export class MslEngine {
 
   private matchTarget(def: EventDef, event: string, init: Partial<MslContext>, ctx: MslContext): boolean {
     if (event === 'RAW') return def.target === '*' || def.target === init.numeric || Number(def.target) === Number(init.numeric);
+    if (event === 'DIALOG') {
+      const [evs, ids] = def.match.split(':');
+      if (!wildMatch(def.target.trim() || '*', init.dname ?? '')) return false;
+      if (evs.trim() !== '*' && !evs.toLowerCase().split(',').map((x) => x.trim()).includes(init.devent ?? '')) return false;
+      if (ids.trim() === '*') return true;
+      const id = Number(init.did);
+      return ids.split(',').some((r) => {
+        const m = /^\s*(\d+)(?:-(\d+))?\s*$/.exec(r);
+        return !!m && id >= Number(m[1]) && id <= Number(m[2] ?? m[1]);
+      });
+    }
     if (!TWO_FIELD_EVENTS.has(event) && !ONE_FIELD_EVENTS.has(event)) return true;
     const t = def.target;
     if (event.startsWith('SOCK')) return wildMatch(t || '*', init.sockname ?? '');
@@ -961,6 +1072,60 @@ export class MslEngine {
     }
 
     switch (name) {
+      case 'dialog': {
+        const m = /^-(\w+)\s+(\S+)\s*(.*)$/s.exec(args);
+        if (!m) throw new MslError('uso: /dialog -m nombre tabla  ·  /dialog -x nombre');
+        const key = m[2].toLowerCase();
+        if (m[1].includes('x')) this.dialogClose(key, false);
+        else if (m[1].includes('t')) {
+          const d = this.dialogs.get(key);
+          if (d) {
+            d.title = m[3];
+            this.dialogNotify(d);
+          }
+        } else if (m[1].includes('m')) this.dialogOpen(m[2], (m[3].split(' ')[0] || m[2]).toLowerCase(), ctx);
+        return;
+      }
+      case 'did': {
+        const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)\s?(.*)$/s.exec(args);
+        const d = m && this.dialogs.get(m[2].toLowerCase());
+        if (!m || !d) return;
+        const flags = m[1] ?? '';
+        for (const part of m[3].split(',')) {
+          const c = d.controls.find((x) => x.id === Number(part));
+          if (!c) continue;
+          const listy = c.type === 'list' || c.type === 'combo';
+          const nm = /^(\d+)\s?(.*)$/s.exec(m[4]);
+          if (flags.includes('r')) {
+            c.lines = [];
+            c.sel = 0;
+            if (!listy) c.text = '';
+          }
+          if (flags.includes('a')) {
+            if (listy) c.lines.push(m[4]);
+            else c.text += m[4];
+          }
+          if (flags.includes('o') && listy && nm && c.lines[Number(nm[1]) - 1] !== undefined) c.lines[Number(nm[1]) - 1] = nm[2];
+          if (flags.includes('d') && listy && nm) {
+            c.lines.splice(Number(nm[1]) - 1, 1);
+            if (c.sel > c.lines.length) c.sel = 0;
+          }
+          if (flags.includes('c')) {
+            if (listy) c.sel = Math.min(c.lines.length, Number(nm?.[1] ?? 0));
+            else this.dialogCheck(d, c);
+          }
+          if (flags.includes('u')) {
+            if (listy) c.sel = 0;
+            else c.checked = false;
+          }
+          if (flags.includes('e')) c.enabled = true;
+          if (flags.includes('b')) c.enabled = false;
+          if (flags.includes('h')) c.visible = false;
+          if (flags.includes('v')) c.visible = true;
+        }
+        this.dialogNotify(d);
+        return;
+      }
       case 'sockopen': {
         const m = /^(?:-(\w+)\s+)?(\S+)\s+(\S+)\s+(\d+)/.exec(args);
         if (!m) throw new MslError('uso: /sockopen [-e] nombre servidor puerto');
@@ -1295,6 +1460,73 @@ export class MslEngine {
     return toks.join(' ');
   }
 
+  // ----------------------------------------------------------- diálogos
+
+  private dialogNotify(d: DialogView): void {
+    this.host.dialogChanged?.(d.name, { ...d, controls: d.controls.map((c) => ({ ...c, lines: [...c.lines], styles: [...c.styles] })) });
+  }
+
+  private dialogOpen(name: string, table: string, ctx: MslContext): void {
+    const key = name.toLowerCase();
+    if (this.dialogs.has(key)) return;
+    let def: DialogDef | undefined;
+    for (const sc of this.scripts.values()) def ??= sc.dialogs.get(table);
+    if (!def) throw new MslError(`no existe la tabla de diálogo "${table}"`);
+    const d: DialogView = {
+      name, title: def.title, w: def.w, h: def.h, dbu: def.dbu,
+      controls: def.controls.map((c) => ({ ...c, styles: [...c.styles], lines: [], sel: 0, checked: false, enabled: !c.styles.includes('disable'), visible: !c.styles.includes('hide') })),
+    };
+    this.dialogs.set(key, d);
+    this.fire('DIALOG', { cid: ctx.cid, dname: name, devent: 'init', did: '0' });
+    if (this.dialogs.get(key) === d) this.dialogNotify(d);
+  }
+
+  private dialogClose(key: string, fireEvent: boolean): void {
+    const d = this.dialogs.get(key);
+    if (!d) return;
+    if (fireEvent) this.fire('DIALOG', { cid: null, dname: d.name, devent: 'close', did: '0' });
+    this.dialogs.delete(key);
+    this.host.dialogChanged?.(d.name, null);
+  }
+
+  /** Marca una casilla; en los botones de opción desmarca los demás de su grupo. */
+  private dialogCheck(d: DialogView, c: DialogControlView): void {
+    if (c.type === 'radio') {
+      const radios = d.controls.filter((x) => x.type === 'radio');
+      const idx = radios.indexOf(c);
+      let start = idx;
+      while (start > 0 && !radios[start].styles.includes('group')) start--;
+      let end = idx + 1;
+      while (end < radios.length && !radios[end].styles.includes('group')) end++;
+      for (const r of radios.slice(start, end)) r.checked = false;
+    }
+    c.checked = true;
+  }
+
+  /** Acción del usuario sobre un diálogo, enviada por la interfaz. */
+  dialogEvent(name: string, event: string, id: number, value: { text?: string; checked?: boolean; sel?: number } = {}): void {
+    const key = name.toLowerCase();
+    const d = this.dialogs.get(key);
+    if (!d) return;
+    if (event === 'close') {
+      this.dialogClose(key, true);
+      return;
+    }
+    const c = d.controls.find((x) => x.id === id);
+    if (!c || !c.enabled || !['sclick', 'dclick', 'edit'].includes(event)) return;
+    if (typeof value.text === 'string' && (c.type === 'edit' || c.type === 'combo')) c.text = value.text.slice(0, 20000);
+    if (typeof value.sel === 'number' && (c.type === 'list' || c.type === 'combo')) c.sel = Math.max(0, Math.min(c.lines.length, Math.trunc(value.sel)));
+    if (typeof value.checked === 'boolean') {
+      if (c.type === 'check') c.checked = value.checked;
+      else if (c.type === 'radio' && value.checked) this.dialogCheck(d, c);
+    }
+    this.fire('DIALOG', { cid: null, dname: d.name, devent: event, did: String(id) });
+    if (this.dialogs.get(key) !== d) return;
+    // Los botones «ok» y «cancel» cierran el diálogo tras su evento, como en mIRC.
+    if (c.type === 'button' && event === 'sclick' && (c.styles.includes('ok') || c.styles.includes('cancel'))) this.dialogClose(key, true);
+    else if (c.type === 'radio') this.dialogNotify(d);
+  }
+
   // ------------------------------------------------------------ sockets
 
   private sockOpen(name: string, host: string, port: number, secure: boolean, ctx: MslContext): void {
@@ -1472,6 +1704,27 @@ export class MslEngine {
       case 'fulladdress': return ctx.nick && ctx.address ? `${ctx.nick}!${ctx.address}` : '';
       case 'snick': return ctx.params[0] ?? '';
       case 'knick': return ctx.knick ?? '';
+      case 'dname': return ctx.dname ?? '';
+      case 'devent': return ctx.devent ?? '';
+      case 'dialog': return this.dialogs.get((a[0] ?? '').toLowerCase())?.name ?? '';
+      case 'did': {
+        if (!args) return ctx.did ?? '';
+        // $did(id) dentro de un evento usa el diálogo actual; $did(nombre,id[,N]) lo nombra.
+        const named = a.length >= 2 && !isNum(a[0]);
+        const d = this.dialogs.get((named ? a[0] : ctx.dname ?? '').toLowerCase());
+        const c = d?.controls.find((x) => x.id === Number(named ? a[1] : a[0]));
+        if (!c) return '';
+        const listy = c.type === 'list' || c.type === 'combo';
+        const nArg = named ? a[2] : a[1];
+        if (prop === 'state') return c.checked ? '1' : '0';
+        if (prop === 'sel') return String(c.sel);
+        if (prop === 'lines') return String(listy ? c.lines.length : c.text.split('\n').length);
+        if (prop === 'enabled') return c.enabled ? '$true' : '$false';
+        if (prop === 'visible') return c.visible ? '$true' : '$false';
+        if (nArg !== undefined && nArg !== '') return (listy ? c.lines : c.text.split('\n'))[Number(nArg) - 1] ?? '';
+        if (listy) return c.type === 'combo' && c.sel === 0 ? c.text : c.lines[c.sel - 1] ?? '';
+        return c.text;
+      }
       case 'sockname': return ctx.sockname ?? '';
       case 'sockbr': return String(ctx.sockbr ?? 0);
       case 'sockerr': return String(ctx.sockerr ?? 0);

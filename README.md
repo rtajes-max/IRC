@@ -9,7 +9,7 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Scripts compatibles con mIRC** (`.mrc`): alias, eventos `on`, `raw`, `ctcp`, variables, `if/elseif/else`, `while`,
   temporizadores, tablas hash, tokens y los identificadores más habituales. Editor integrado en «Scripts».
 - **IRCv3**: TLS, autenticación SASL, hora del servidor, historial (`chathistory`), aviso de «está escribiendo» y reacciones.
-- **DCC**: envío y recepción de archivos (también DCC pasivo al recibir) y chat directo. Las ofertas entrantes nunca se aceptan solas.
+- **DCC**: envío y recepción de archivos (también en modo pasivo, con `/dcc send -p`, para quien no puede recibir conexiones) y chat directo. Las ofertas entrantes nunca se aceptan solas.
 - **Contraseñas** de las redes guardadas cifradas con el almacén de claves del sistema, cuando está disponible.
 - **Registros** de conversación en texto plano, con buscador.
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
@@ -33,8 +33,8 @@ Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -
 ## RogerNet (irc.rogertp.es)
 
 - Servidor Ergo; único puerto público: 6697 con TLS.
-- Cuentas: `/msg NickServ REGISTER contraseña` registra tu nick. Después rellena «Cuenta (SASL)» y «Contraseña (SASL)» en
-  «Conectar» para identificarte al entrar; un nick registrado exige autenticarse.
+- Cuentas: `/register contraseña` registra tu nick y guarda la cuenta en la red para identificarte sola al entrar (SASL).
+  Un nick registrado exige autenticarse.
 - Los mensajes que llegan por el puente de Telegram usan nicks `Nombre/tg`; el cliente los muestra como «Nombre» con la etiqueta «Telegram».
 - El servidor oculta tu IP, pero un DCC es una conexión directa y la revela a la otra persona.
 
@@ -58,8 +58,10 @@ Admitido:
 - `timer`, tablas hash (`hadd`, `$hget`…), tokens (`$gettok`…), `$regex`, `$calc`, `write/$read`.
 - Sockets: `sockopen [-e]`, `sockwrite`, `sockread`, `sockclose` y los eventos `SOCKOPEN/SOCKREAD/SOCKCLOSE`.
 - Ventanas personalizadas: `/window @nombre`, `/aline`, `/echo @nombre` y `on INPUT` sobre ellas.
+- Diálogos: tablas `dialog` con `text`, `edit`, `button`, `check`, `radio`, `list`, `combo` y `box`; `/dialog -m/-x/-t`, `/did`,
+  `$did`, `$dialog` y `on DIALOG` (`init`, `sclick`, `dclick`, `edit`, `close`).
 
-No admitido: `dialog` (diálogos gráficos), niveles de usuario, ventanas con imágenes (`/window -p`, `/drawrect`…),
+No admitido: controles de diálogo `tab`, `icon`, `menu` y `scroll`, niveles de usuario, ventanas con imágenes (`/window -p`, `/drawrect`…),
 sockets de escucha y UDP, y COM/DLL (propios de Windows). Al cargar un script se avisa de lo que se ha ignorado.
 
 Diferencias deliberadas, por seguridad: el texto recibido de la red nunca se reevalúa (tampoco dentro de `[ ]`), los
@@ -68,8 +70,7 @@ temporizadores no reevalúan su comando al dispararse y `/write`, `$read` y simi
 ## Pendiente
 
 - Firma de los instaladores (requiere certificados de pago de Windows y Apple).
-- Enviar por DCC pasivo y reanudar transferencias (recibir por DCC pasivo sí funciona).
-- Diálogos gráficos (`dialog`) de mIRC.
+- Reanudar transferencias DCC interrumpidas.
 
 ## Estructura
 

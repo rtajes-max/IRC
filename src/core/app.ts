@@ -10,7 +10,7 @@ import { IrcClient, MessageEvent } from './irc/client';
 import { stripFormatting } from './irc/formatting';
 import { IrcMessage, ircLower } from './irc/message';
 import { Logger } from './logs';
-import { MenuEntry, MslContext, MslEngine, MslHost, newContext } from './msl/engine';
+import { DialogView, MenuEntry, MslContext, MslEngine, MslHost, newContext } from './msl/engine';
 import {
   BufferType, DccInfo, LOCAL, Line, LineKind, NetworkConfig, NickEntry, STATUS, ScriptInfo, SessionInfo, Settings,
   Snapshot, UiEvent,
@@ -29,6 +29,7 @@ interface Session {
   state: SessionInfo['state'];
   reconnects: number;
   reconnectTimer: NodeJS.Timeout | null;
+  pendingRegistration?: { password: string; at: number };
 }
 
 interface DccEntry {
@@ -37,6 +38,7 @@ interface DccEntry {
   recv?: DccReceive;
   send?: DccSend;
   chat?: DccChat;
+  token?: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -206,6 +208,7 @@ export class AppCore extends EventEmitter implements MslHost {
       networks: this.networks,
       dccs: [...this.dccs.values()].map((d) => d.info),
       windows: [...this.windows.values()],
+      dialogs: [...this.engine.dialogs.values()],
     };
   }
 
@@ -354,6 +357,18 @@ export class AppCore extends EventEmitter implements MslHost {
     c.on('sasl', (ok: boolean, text: string) =>
       ok ? this.note(sid, STATUS, 'Autenticación SASL correcta') : this.error(sid, STATUS, `Falló la autenticación SASL: ${text}`),
     );
+    c.on('loggedin', (account: string) => {
+      this.note(sid, STATUS, `Sesión iniciada como ${account}`);
+      // Tras /register, la cuenta se guarda en la red para identificarse sola (SASL) en adelante.
+      const pending = s.pendingRegistration;
+      s.pendingRegistration = undefined;
+      if (!pending || Date.now() - pending.at > 120000) return;
+      s.cfg = { ...s.cfg, saslAccount: account || c.nick, saslPassword: pending.password };
+      if (this.networks.some((n) => n.name === s.cfg.name)) {
+        this.saveNetwork(s.cfg);
+        this.note(sid, STATUS, 'Cuenta registrada. Se ha guardado en esta red para identificarte automáticamente.');
+      } else this.note(sid, STATUS, 'Cuenta registrada. Guarda esta red desde «Conectar» para identificarte automáticamente.');
+    });
     c.on('registered', () => {
       s.state = 'connected';
       s.reconnects = 0;
@@ -622,6 +637,15 @@ export class AppCore extends EventEmitter implements MslHost {
     this.ui({ type: 'line', sid, buffer, line: { time: Date.now(), kind: 'echo', text } });
   }
 
+  dialogChanged(name: string, view: DialogView | null): void {
+    this.ui({ type: 'dialog', name, view });
+  }
+
+  /** Acción del usuario sobre un diálogo de script (clic, texto, selección o cierre). */
+  dialogEvent(name: string, event: string, id: number, value?: { text?: string; checked?: boolean; sel?: number }): void {
+    this.engine.dialogEvent(String(name), String(event), Number(id) || 0, value && typeof value === 'object' ? value : {});
+  }
+
   raw(line: string, ctx: MslContext): void {
     const s = this.sessionOf(ctx);
     if (s?.client.connected) s.client.send(line);
@@ -756,6 +780,14 @@ export class AppCore extends EventEmitter implements MslHost {
         if (!online()) return fail('No estás conectado');
         s!.client.send(`MODE ${toks.length && !/^[+-]/.test(toks[0]) ? args : `${chan || s!.client.nick} ${args}`}`);
         return true;
+      case 'register': {
+        if (!online()) return fail('No estás conectado');
+        if (!toks[0]) return fail('Uso: /register contraseña  (registra tu nick actual como cuenta en la red)');
+        s!.pendingRegistration = { password: args, at: Date.now() };
+        s!.client.send(`PRIVMSG NickServ :REGISTER ${args}`);
+        this.note(sid, STATUS, `Solicitando el registro de la cuenta ${s!.client.nick}…`);
+        return true;
+      }
       case 'whois':
         if (!online()) return fail('No estás conectado');
         s!.client.send(`WHOIS ${toks[0] ?? s!.client.nick}`);
@@ -839,15 +871,17 @@ export class AppCore extends EventEmitter implements MslHost {
       case 'dcc': {
         const sub = (toks[0] ?? '').toLowerCase();
         if (!online()) return fail('No estás conectado');
-        if (sub === 'send' && toks[1] && toks[2]) void this.dccSend(sid, toks[1], tail(2).replace(/^"(.*)"$/, '$1'));
+        const passive = toks[1] === '-p';
+        if (passive) toks.splice(1, 1);
+        if (sub === 'send' && toks[1] && toks[2]) void this.dccSend(sid, toks[1], toks.slice(2).join(' ').replace(/^"(.*)"$/, '$1'), passive);
         else if (sub === 'chat' && toks[1]) void this.dccChat(sid, toks[1]);
-        else return fail('Uso: /dcc send nick archivo  ·  /dcc chat nick');
+        else return fail('Uso: /dcc send [-p] nick archivo  ·  /dcc chat nick  (-p: envío pasivo, si no puedes recibir conexiones)');
         return true;
       }
       case 'help':
         for (const l of [
           'Comandos principales: /server [-e] host[:puerto] · /join #canal · /part · /msg nick texto · /query nick · /me acción',
-          '/nick · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
+          '/nick · /register contraseña · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
           'Scripts mIRC: /load archivo.mrc · /unload archivo.mrc · // evalúa identificadores (p. ej. //echo -a $me)',
         ]) this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'info', l);
         return true;
@@ -932,6 +966,17 @@ export class AppCore extends EventEmitter implements MslHost {
       this.note(s.sid, STATUS, `${from} envió una oferta DCC que no se admite (${args.split(' ')[0]})`);
       return;
     }
+    // Respuesta a un envío pasivo nuestro: el destinatario indica dónde conectarse.
+    if (offer.type === 'SEND' && offer.token && offer.port > 0) {
+      const mine = [...this.dccs.values()].find(
+        (x) => x.send && x.token === offer.token && x.info.sid === s.sid && ircLower(x.info.nick) === ircLower(from) && x.info.status === 'waiting',
+      );
+      if (mine) {
+        mine.send!.connectTo(offer.ip, offer.port);
+        return;
+      }
+    }
+    if (offer.port === 0 && !offer.token) return;
     const d = this.newDcc({
       sid: s.sid, nick: from, direction: 'in', type: offer.type, filename: offer.type === 'SEND' ? offer.filename : '',
       size: offer.size, transferred: 0, status: 'offered',
@@ -1000,7 +1045,7 @@ export class AppCore extends EventEmitter implements MslHost {
     });
   }
 
-  async dccSend(sid: string, nick: string, filePath: string): Promise<void> {
+  async dccSend(sid: string, nick: string, filePath: string, passive = false): Promise<void> {
     const s = this.sessions.get(sid);
     if (!s) return;
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -1020,7 +1065,8 @@ export class AppCore extends EventEmitter implements MslHost {
     });
     send.on('error', (e: Error) => this.dccUpdate(d, { status: 'failed', error: e.message }));
     try {
-      const ctcp = await send.listen(s.client.localAddress);
+      if (passive) d.token = String(Math.floor(Math.random() * 9e8) + 1e8);
+      const ctcp = passive ? send.passiveOffer(d.token!) : await send.listen(s.client.localAddress);
       s.client.ctcp(nick, 'DCC', ctcp);
       this.dccUpdate(d);
       this.note(sid, STATUS, `Ofreciendo "${d.info.filename}" a ${nick} por DCC…`);

@@ -77,6 +77,30 @@ describe('DCC', () => {
     sock.destroy();
   });
 
+  it('envío pasivo de extremo a extremo: oferta con puerto 0, respuesta y conexión del remitente', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-pasivo2-'));
+    const src = path.join(dir, 'foto grande.bin');
+    const data = Buffer.alloc(150_000, 9);
+    fs.writeFileSync(src, data);
+    const send = new DccSend(src);
+    const offer = parseDccOffer(send.passiveOffer('4242'))!;
+    expect(offer).toMatchObject({ port: 0, token: '4242', size: data.length, filename: 'foto grande.bin' });
+    const recv = new DccReceive(offer, path.join(dir, 'dest'));
+    const done = new Promise<string>((resolve, reject) => {
+      recv.on('done', resolve);
+      recv.on('error', reject);
+    });
+    const sent = new Promise<void>((resolve, reject) => {
+      send.on('done', resolve);
+      send.on('error', reject);
+    });
+    const reply = parseDccOffer(await recv.listenPassive('127.0.0.1'))!;
+    expect(reply.token).toBe('4242');
+    send.connectTo(reply.ip, reply.port);
+    expect(fs.readFileSync(await done).equals(data)).toBe(true);
+    await sent;
+  });
+
   it('chat DCC en ambos sentidos', async () => {
     const a = new DccChat();
     const b = new DccChat();
@@ -155,6 +179,49 @@ describe('contraseñas guardadas', () => {
     const b = new AppCore({ dataDir: dir });
     expect(b.networks.find((n) => n.name === 'Red')!.saslPassword).toBe('sésamo');
     b.shutdown();
+  });
+});
+
+describe('registro de cuenta', () => {
+  it('/register pide la cuenta a NickServ y guarda las credenciales SASL cuando el servidor confirma', async () => {
+    const net = await import('node:net');
+    const got: string[] = [];
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8');
+      sock.on('error', () => undefined);
+      let buf = '';
+      sock.on('data', (d: string) => {
+        buf += d;
+        let i: number;
+        while ((i = buf.indexOf('\r\n')) !== -1) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          got.push(line);
+          if (line === 'CAP LS 302') sock.write(':srv CAP * LS :sasl=PLAIN\r\n');
+          else if (line.startsWith('USER ')) sock.write(':srv 001 nuevo :Hola\r\n');
+          else if (line.startsWith('PRIVMSG NickServ :REGISTER ')) sock.write(':srv 900 nuevo nuevo!u@h nuevo :Sesión iniciada\r\n');
+        }
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-reg-'));
+    const app = new AppCore({ dataDir: dir });
+    const ev: UiEvent[] = [];
+    app.on('ui', (e: UiEvent) => ev.push(e));
+    const cfg = { name: 'Local', host: '127.0.0.1', port, tls: false, nick: 'nuevo' };
+    app.saveNetwork(cfg);
+    const sid = app.connect(cfg);
+    await waitFor(() => app.sessions.get(sid)!.state === 'connected', 'conexión');
+    app.input(sid, '*', '/register cl4ve secreta');
+    await waitFor(() => app.networks.find((n) => n.name === 'Local')?.saslAccount === 'nuevo', 'cuenta guardada');
+    expect(app.networks.find((n) => n.name === 'Local')).toMatchObject({ saslAccount: 'nuevo', saslPassword: 'cl4ve secreta' });
+    expect(got).toContain('PRIVMSG NickServ :REGISTER cl4ve secreta');
+    // La contraseña no aparece en ninguna línea mostrada ni en los registros.
+    expect(JSON.stringify(ev)).not.toContain('cl4ve');
+    expect(fs.existsSync(path.join(dir, 'logs'))).toBe(false);
+    app.shutdown();
+    srv.close();
   });
 });
 

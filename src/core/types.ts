@@ -1,4 +1,7 @@
 /** Tipos compartidos entre el núcleo, el proceso principal y la interfaz. */
+import type { DialogView } from './msl/engine';
+
+export type { DialogControlView, DialogView } from './msl/engine';
 
 export const STATUS = '*';
 export const LOCAL = 'local';
@@ -89,6 +92,7 @@ export type UiEvent =
   | { type: 'typing'; sid: string; buffer: string; nick: string; state: string }
   | { type: 'react'; sid: string; buffer: string; nick: string; emoji: string; msgid: string }
   | { type: 'dcc'; dcc: DccInfo }
+  | { type: 'dialog'; name: string; view: DialogView | null }
   | { type: 'scripts' }
   | { type: 'settings'; settings: Settings };
 
@@ -99,6 +103,8 @@ export interface Snapshot {
   dccs: DccInfo[];
   /** Ventanas personalizadas creadas por scripts (/window @nombre). */
   windows: string[];
+  /** Diálogos de scripts abiertos. */
+  dialogs: DialogView[];
 }
 
 export interface ScriptInfo {
