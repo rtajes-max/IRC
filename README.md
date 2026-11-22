@@ -9,9 +9,10 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Scripts compatibles con mIRC** (`.mrc`): alias, eventos `on`, `raw`, `ctcp`, variables, `if/elseif/else`, `while`,
   temporizadores, tablas hash, tokens y los identificadores más habituales. Editor integrado en «Scripts».
 - **IRCv3**: TLS, autenticación SASL, hora del servidor, historial (`chathistory`), aviso de «está escribiendo» y reacciones.
-- **DCC**: envío y recepción de archivos (también en modo pasivo, con `/dcc send -p`, para quien no puede recibir conexiones) y chat directo. Las ofertas entrantes nunca se aceptan solas.
+- **DCC**: envío y recepción de archivos (también en modo pasivo, con `/dcc send -p`, para quien no puede recibir conexiones), reanudación de descargas interrumpidas y chat directo. Las ofertas entrantes nunca se aceptan solas.
 - **Contraseñas** de las redes guardadas cifradas con el almacén de claves del sistema, cuando está disponible.
-- **Uso diario**: reconexión automática volviendo a los canales abiertos, detección de conexiones caídas y lista de ignorados (`/ignore`).
+- **Uso diario**: reconexión automática volviendo a los canales abiertos, detección de conexiones caídas, lista de ignorados (`/ignore`),
+  avisos de amigos (`/notify`), comandos automáticos al conectar, lista de canales de la red («Canales» o `/list`) y búsqueda en la conversación (Ctrl+F).
 - **Registros** de conversación en texto plano, con buscador.
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
 
@@ -71,7 +72,6 @@ temporizadores no reevalúan su comando al dispararse y `/write`, `$read` y simi
 ## Pendiente
 
 - Firma de los instaladores (requiere certificados de pago de Windows y Apple).
-- Reanudar transferencias DCC interrumpidas.
 
 ## Estructura
 

@@ -1,6 +1,6 @@
 import { MIRC_COLORS, parseFormatting, stripFormatting } from '../core/irc/formatting';
 import type {
-  BufferType, DccInfo, DialogControlView, DialogView, Line, NetworkConfig, NickEntry, ScriptInfo, SessionInfo, Settings, Snapshot, UiEvent,
+  BufferType, ChannelListEntry, DccInfo, DialogControlView, DialogView, Line, NetworkConfig, NickEntry, ScriptInfo, SessionInfo, Settings, Snapshot, UiEvent,
 } from '../core/types';
 
 const STATUS = '*';
@@ -86,12 +86,13 @@ function activate(sid: string, buffer: string): void {
   b.unread = 0;
   b.highlight = false;
   void window.onda.invoke('setActive', sid, b.name);
+  if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
   renderTree();
   renderLog();
   renderHeader();
   renderNicks();
   renderTyping();
-  input.focus();
+  if ($('find').hidden) input.focus();
 }
 
 // --------------------------------------------------------------- dibujado
@@ -305,8 +306,15 @@ function splitRelay(nick: string): { name: string; network: string } {
   return { name: nick.slice(0, i), network: RELAY_NETWORKS[label.toLowerCase()] ?? label };
 }
 
+let findQuery = '';
+
+function matchesFind(line: Line): boolean {
+  return !findQuery || `${line.nick ?? ''} ${stripFormatting(line.text)}`.toLowerCase().includes(findQuery);
+}
+
 function lineRow(b: BufferState, line: Line): HTMLElement {
   const row = el('div', `row ${line.kind}`);
+  if (findQuery && matchesFind(line)) row.classList.add('match');
   if (line.highlight) row.classList.add('highlight');
   if (line.self) row.classList.add('self');
   if (line.history) row.classList.add('history');
@@ -663,6 +671,10 @@ function onUi(ev: UiEvent): void {
     case 'dialog':
       syncDialog(ev.name, ev.view);
       break;
+    case 'chanlist':
+      chanLists.set(ev.sid, ev.channels);
+      if (listSid === ev.sid) renderChanList();
+      break;
     case 'dcc':
       dccs.set(ev.dcc.id, ev.dcc);
       renderDcc();
@@ -829,6 +841,7 @@ function fillConnect(n: Partial<NetworkConfig>): void {
   set('password', n.password ?? '');
   set('allowInvalidCert', n.allowInvalidCert ?? false);
   set('autoconnect', n.autoconnect ?? false);
+  (f.elements.namedItem('perform') as HTMLTextAreaElement).value = (n.perform ?? []).join('\n');
 }
 
 function renderSaved(): void {
@@ -879,6 +892,7 @@ $('connect-form').addEventListener('submit', async () => {
     password: String(f.get('password') ?? '') || undefined,
     allowInvalidCert: f.has('allowInvalidCert'),
     autoconnect: f.has('autoconnect'),
+    perform: String(f.get('perform') ?? '').split('\n').map((l) => l.trim()).filter(Boolean),
   };
   if (f.has('save')) networks = [...networks.filter((n) => n.name !== cfg.name), cfg];
   await window.onda.invoke('connect', cfg, f.has('save'));
@@ -980,6 +994,82 @@ $<HTMLTextAreaElement>('script-source').addEventListener('keydown', (e) => {
     t.setRangeText('  ', t.selectionStart, t.selectionEnd, 'end');
   }
 });
+
+// Búsqueda en la conversación (Ctrl+F)
+function applyFind(): void {
+  findQuery = $<HTMLInputElement>('find-input').value.trim().toLowerCase();
+  log.classList.toggle('finding', !!findQuery);
+  renderLog();
+  const b = activeBuffer();
+  $('find-count').textContent = findQuery && b ? `${b.lines.filter(matchesFind).length} coincidencias` : '';
+}
+function closeFind(): void {
+  $('find').hidden = true;
+  $<HTMLInputElement>('find-input').value = '';
+  applyFind();
+  input.focus();
+}
+$('find-input').addEventListener('input', applyFind);
+$('find-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeFind();
+});
+$('find-close').addEventListener('click', closeFind);
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    $('find').hidden = false;
+    $('find-input').focus();
+  }
+});
+
+// Lista de canales de la red
+const chanLists = new Map<string, ChannelListEntry[]>();
+let listSid = '';
+
+function renderChanList(): void {
+  const all = chanLists.get(listSid);
+  const out = $('list-results');
+  out.replaceChildren();
+  if (!all) {
+    $('list-status').textContent = 'Pidiendo la lista al servidor…';
+    return;
+  }
+  const q = $<HTMLInputElement>('list-filter').value.trim().toLowerCase();
+  const hits = q ? all.filter((c) => c.name.toLowerCase().includes(q) || c.topic.toLowerCase().includes(q)) : all;
+  $('list-status').textContent = `${hits.length} de ${all.length} canales${hits.length > 500 ? ' (se muestran los 500 con más usuarios)' : ''}. Pulsa uno para entrar.`;
+  for (const c of hits.slice(0, 500)) {
+    const row = el('button', 'chan-row');
+    row.type = 'button';
+    row.append(el('span', 'n', c.name), el('span', 'u', String(c.users)), el('span', 't', stripFormatting(c.topic)));
+    row.title = stripFormatting(c.topic);
+    row.addEventListener('click', () => {
+      void window.onda.invoke('input', listSid, STATUS, `/join ${c.name}`);
+      dialog('dlg-list').close();
+    });
+    out.append(row);
+  }
+}
+
+function requestChanList(): void {
+  chanLists.delete(listSid);
+  renderChanList();
+  void window.onda.invoke('input', listSid, STATUS, '/list');
+}
+
+$('btn-list').addEventListener('click', () => {
+  const s = sessions.get(active.sid);
+  if (!s || s.info.sid === LOCAL || s.info.state !== 'connected') {
+    send('/list'); // muestra el aviso de «No estás conectado» en la ventana activa
+    return;
+  }
+  listSid = s.info.sid;
+  dialog('dlg-list').showModal();
+  if (chanLists.has(listSid)) renderChanList();
+  else requestChanList();
+});
+$('list-refresh').addEventListener('click', requestChanList);
+$('list-filter').addEventListener('input', renderChanList);
+$('list-form').addEventListener('submit', (e) => e.preventDefault());
 
 // Transferencias y registros
 $('btn-dcc').addEventListener('click', () => {

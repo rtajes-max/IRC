@@ -66,8 +66,23 @@ export class DccReceive extends EventEmitter {
     super();
   }
 
-  start(): void {
-    this.attach(net.connect({ host: this.offer.ip, port: this.offer.port }));
+  private get partPath(): string {
+    return path.join(this.destDir, this.offer.filename + '.part');
+  }
+
+  /** Bytes ya descargados en un intento anterior que se pueden aprovechar (0 si no hay nada que reanudar). */
+  resumePosition(): number {
+    try {
+      const size = fs.statSync(this.partPath).size;
+      return size > 0 && this.offer.size > 0 && size < this.offer.size ? size : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Conecta con el remitente. `from` > 0 continúa una descarga parcial desde esa posición. */
+  start(from = 0): void {
+    this.attach(net.connect({ host: this.offer.ip, port: this.offer.port }), from);
   }
 
   /**
@@ -98,10 +113,11 @@ export class DccReceive extends EventEmitter {
     });
   }
 
-  private attach(sock: net.Socket): void {
+  private attach(sock: net.Socket, from = 0): void {
     fs.mkdirSync(this.destDir, { recursive: true });
-    this.path = uniquePath(this.destDir, this.offer.filename);
-    const out = fs.createWriteStream(this.path);
+    // Se descarga en un archivo «.part»; solo al terminar recibe su nombre definitivo.
+    const out = fs.createWriteStream(this.partPath, { flags: from > 0 ? 'a' : 'w' });
+    this.received = from;
     this.socket = sock;
     sock.setTimeout(60000, () => sock.destroy(new Error('tiempo de espera agotado')));
     const finish = (err?: Error) => {
@@ -109,8 +125,15 @@ export class DccReceive extends EventEmitter {
       this.finished = true;
       out.end(() => {
         const complete = !err && (this.offer.size === 0 || this.received >= this.offer.size);
-        if (complete) this.emit('done', this.path);
-        else this.emit('error', err ?? new Error('transferencia incompleta'));
+        if (complete) {
+          try {
+            this.path = uniquePath(this.destDir, this.offer.filename);
+            fs.renameSync(this.partPath, this.path);
+            this.emit('done', this.path);
+          } catch (e) {
+            this.emit('error', e);
+          }
+        } else this.emit('error', err ?? new Error('transferencia incompleta (se podrá reanudar)'));
       });
       sock.destroy();
     };
@@ -139,6 +162,9 @@ export class DccSend extends EventEmitter {
   private server: net.Server | null = null;
   private finished = false;
   private connected = false;
+  /** Puerto en el que se espera al destinatario (0 si no se está escuchando). */
+  port = 0;
+  private offset = 0;
   private passiveTimer: NodeJS.Timeout | null = null;
 
   constructor(public filePath: string) {
@@ -146,7 +172,8 @@ export class DccSend extends EventEmitter {
   }
 
   private stream(sock: net.Socket): void {
-    const stream = fs.createReadStream(this.filePath);
+    const stream = fs.createReadStream(this.filePath, { start: this.offset });
+    this.sent = this.offset;
     const finish = (err?: Error) => {
       if (this.finished) return;
       this.finished = true;
@@ -184,6 +211,13 @@ export class DccSend extends EventEmitter {
     return `SEND ${name.includes(' ') ? `"${name}"` : name} 2130706433 0 ${this.size} ${token}`;
   }
 
+  /** El destinatario pide reanudar desde `position`. Devuelve false si la posición no es válida. */
+  resumeFrom(position: number): boolean {
+    if (this.connected || this.finished || !Number.isInteger(position) || position <= 0 || position >= this.size) return false;
+    this.offset = position;
+    return true;
+  }
+
   connectTo(ip: string, port: number): void {
     if (this.finished || this.connected) return;
     this.connected = true;
@@ -212,6 +246,7 @@ export class DccSend extends EventEmitter {
       server.on('error', reject);
       server.listen(port, () => {
         const addr = server.address() as net.AddressInfo;
+        this.port = addr.port;
         const name = path.basename(this.filePath);
         const quoted = name.includes(' ') ? `"${name}"` : name;
         resolve(`SEND ${quoted} ${ipToInt(localIp)} ${addr.port} ${this.size}`);
@@ -276,4 +311,11 @@ export class DccChat extends EventEmitter {
     this.server?.close();
     this.socket?.destroy();
   }
+}
+
+/** Interpreta `RESUME archivo puerto posición` y `ACCEPT archivo puerto posición`. */
+export function parseDccResume(args: string): { kind: 'RESUME' | 'ACCEPT'; port: number; position: number } | null {
+  const m = /^(RESUME|ACCEPT)\s+(?:"[^"]*"|\S+)\s+(\d+)\s+(\d+)/i.exec(args.trim());
+  if (!m) return null;
+  return { kind: m[1].toUpperCase() as 'RESUME' | 'ACCEPT', port: Number(m[2]), position: Number(m[3]) };
 }

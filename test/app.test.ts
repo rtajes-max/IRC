@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppCore } from '../src/core/app';
-import { DccChat, DccReceive, DccSend, intToIp, ipToInt, parseDccOffer, safeFilename } from '../src/core/dcc';
+import { DccChat, DccReceive, DccSend, intToIp, ipToInt, parseDccOffer, parseDccResume, safeFilename } from '../src/core/dcc';
 import { DccInfo, Line, STATUS, UiEvent } from '../src/core/types';
 import { hasNgircd, startServer, waitFor } from './helpers';
 
@@ -99,6 +99,59 @@ describe('DCC', () => {
     send.connectTo(reply.ip, reply.port);
     expect(fs.readFileSync(await done).equals(data)).toBe(true);
     await sent;
+  });
+
+  it('reanuda una descarga interrumpida desde donde se quedó', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-resume-'));
+    const src = path.join(dir, 'video.bin');
+    const data = Buffer.alloc(400_000);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 255;
+    fs.writeFileSync(src, data);
+    const dest = path.join(dir, 'dest');
+    fs.mkdirSync(dest);
+    // Queda un «.part» con los primeros 150 000 bytes de un intento anterior.
+    fs.writeFileSync(path.join(dest, 'video.bin.part'), data.subarray(0, 150_000));
+
+    const send = new DccSend(src);
+    const offer = parseDccOffer(await send.listen('127.0.0.1'))!;
+    const recv = new DccReceive(offer, dest);
+    expect(recv.resumePosition()).toBe(150_000);
+    expect(parseDccResume(`RESUME video.bin ${offer.port} 150000`)).toEqual({ kind: 'RESUME', port: offer.port, position: 150_000 });
+    expect(send.resumeFrom(150_000)).toBe(true);
+    expect(send.resumeFrom(data.length)).toBe(false);
+    let firstProgress = 0;
+    send.on('progress', (n: number) => (firstProgress ||= n));
+    const done = new Promise<string>((resolve, reject) => {
+      recv.on('done', resolve);
+      recv.on('error', reject);
+    });
+    recv.start(150_000);
+    const file = await done;
+    expect(path.basename(file)).toBe('video.bin');
+    expect(fs.readFileSync(file).equals(data)).toBe(true);
+    expect(firstProgress).toBeGreaterThan(150_000); // solo se envió lo que faltaba
+    expect(fs.existsSync(path.join(dest, 'video.bin.part'))).toBe(false);
+  });
+
+  it('una descarga cortada deja el «.part» y no un archivo final incompleto', async () => {
+    const net = await import('node:net');
+    const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'onda-corte-'));
+    const srv = net.createServer((sock) => {
+      sock.on('error', () => undefined);
+      sock.write(Buffer.alloc(1000, 1), () => sock.destroy());
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    const recv = new DccReceive(parseDccOffer(`SEND doc.bin 2130706433 ${port} 5000`)!, dest);
+    const err = await new Promise<Error>((resolve) => {
+      recv.on('error', resolve);
+      recv.on('done', () => resolve(new Error('no debía completarse')));
+      recv.start();
+    });
+    expect(err.message).toMatch(/incompleta/);
+    expect(fs.readdirSync(dest)).toEqual(['doc.bin.part']);
+    expect(recv.resumePosition()).toBe(1000);
+    srv.close();
   });
 
   it('chat DCC en ambos sentidos', async () => {
@@ -426,6 +479,38 @@ alias saludo { me saluda a $1 con $2- }`);
     user.dccAccept(dccOf(user)!.id);
     await waitFor(() => dccOf(user)?.status === 'done' && dccOf(bot)?.status === 'done', 'transferencia completa');
     expect(fs.readFileSync(dccOf(user)!.path!, 'utf8')).toBe(fs.readFileSync(file, 'utf8'));
+  });
+
+  it('comandos al conectar (perform), lista de canales y reanudación DCC entre dos clientes', async () => {
+    const [bot, user] = apps;
+    const sidB = [...bot.sessions.keys()][0];
+    // Perform: un tercer cliente entra en un canal y saluda al conectar.
+    const third = mk('paco');
+    const sid3 = third.app.connect({ name: 'P', host: '127.0.0.1', port: PORT, tls: false, nick: 'paco', perform: ['/join #juegos', '//msg #juegos hola, soy $me'] });
+    await waitFor(() => texts(bot, '#juegos').includes('<paco> hola, soy paco'), 'perform ejecutado');
+
+    third.app.input(sid3, '*', '/list');
+    await waitFor(() => events.get(third.app)!.some((e) => e.type === 'chanlist'), 'lista de canales');
+    const list = events.get(third.app)!.find((e) => e.type === 'chanlist');
+    expect(list?.type === 'chanlist' && list.channels[0]).toMatchObject({ name: '#juegos', users: 3 });
+    expect(texts(third.app, STATUS).some((t) => t.includes('#juegos 3'))).toBe(false);
+
+    // Reanudación: paco ya tiene la primera parte del archivo que le envía robot.
+    const file = path.join(os.tmpdir(), `onda-resume-${Date.now()}.bin`);
+    const data = Buffer.alloc(300_000);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 13) & 255;
+    fs.writeFileSync(file, data);
+    fs.mkdirSync(path.join(third.dir, 'descargas'), { recursive: true });
+    fs.writeFileSync(path.join(third.dir, 'descargas', path.basename(file) + '.part'), data.subarray(0, 100_000));
+    bot.input(sidB, STATUS, `/dcc send paco ${file}`);
+    const dccOf = (app: AppCore) => events.get(app)!.flatMap((e) => (e.type === 'dcc' ? [e.dcc] : [])).pop();
+    await waitFor(() => dccOf(third.app)?.status === 'offered', 'oferta');
+    third.app.dccAccept(dccOf(third.app)!.id);
+    await waitFor(() => dccOf(third.app)?.status === 'done' && dccOf(bot)?.status === 'done', 'transferencia reanudada');
+    expect(fs.readFileSync(dccOf(third.app)!.path!).equals(data)).toBe(true);
+    const sentProgress = events.get(bot)!.flatMap((e) => (e.type === 'dcc' && e.dcc.filename === path.basename(file) && e.dcc.transferred > 0 ? [e.dcc.transferred] : []));
+    expect(Math.min(...sentProgress)).toBeGreaterThan(100_000);
+    third.app.input(sid3, '*', '/quit');
   });
 
   it('/ignore oculta los mensajes de un usuario y /unignore los recupera', async () => {

@@ -20,6 +20,8 @@ export interface NetworkConfig {
   autojoin?: string[];
   allowInvalidCert?: boolean;
   autoconnect?: boolean;
+  /** Comandos que se ejecutan al conectar (uno por línea), como el «Perform» de mIRC. */
+  perform?: string[];
 }
 
 export interface Settings {
@@ -35,6 +37,8 @@ export interface Settings {
   sendTyping: boolean;
   /** Nicks o máscaras (nick!usuario@host, con comodines) cuyos mensajes no se muestran. */
   ignore: string[];
+  /** Nicks de los que se avisa cuando entran o salen de la red. */
+  notify: string[];
 }
 
 export type LineKind =
@@ -81,6 +85,12 @@ export interface DccInfo {
   path?: string;
 }
 
+export interface ChannelListEntry {
+  name: string;
+  users: number;
+  topic: string;
+}
+
 export type UiEvent =
   | ({ type: 'session' } & SessionInfo)
   | { type: 'session:remove'; sid: string }
@@ -95,6 +105,7 @@ export type UiEvent =
   | { type: 'react'; sid: string; buffer: string; nick: string; emoji: string; msgid: string }
   | { type: 'dcc'; dcc: DccInfo }
   | { type: 'dialog'; name: string; view: DialogView | null }
+  | { type: 'chanlist'; sid: string; channels: ChannelListEntry[] }
   | { type: 'scripts' }
   | { type: 'settings'; settings: Settings };
 
