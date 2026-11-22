@@ -21,7 +21,7 @@ npm start        # compila y abre la aplicación
 npm test         # pruebas (las de integración usan ngircd si está instalado)
 ```
 
-Dentro de la aplicación: «Conectar», o `/server irc.libera.chat` y `/join #canal`. `/help` lista los comandos.
+Dentro de la aplicación: «Conectar», o `/server irc.rogertp.es` y `/join #canal`. `/help` lista los comandos.
 Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -a $me`).
 
 ## Ejemplo de script

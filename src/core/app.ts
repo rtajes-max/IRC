@@ -52,6 +52,9 @@ const DEFAULT_SETTINGS: Settings = {
   sendTyping: true,
 };
 
+/** Red preconfigurada en la primera ejecución. */
+export const DEFAULT_NETWORK: NetworkConfig = { name: 'irc.rogertp.es', host: 'irc.rogertp.es', port: 6697, tls: true, nick: '' };
+
 export class AppCore extends EventEmitter implements MslHost {
   sessions = new Map<string, Session>();
   engine: MslEngine;
@@ -103,7 +106,8 @@ export class AppCore extends EventEmitter implements MslHost {
       this.settings = { ...DEFAULT_SETTINGS, ...(cfg.settings ?? {}) };
       this.networks = Array.isArray(cfg.networks) ? cfg.networks : [];
     } catch {
-      /* primera ejecución */
+      // Primera ejecución: la red propia queda preconfigurada.
+      this.networks = [{ ...DEFAULT_NETWORK, nick: this.settings.nick }];
     }
     try {
       const vars = JSON.parse(fs.readFileSync(path.join(this.rootDir, 'vars.json'), 'utf8'));

@@ -638,7 +638,7 @@ function renderSaved(): void {
 }
 
 $('btn-connect').addEventListener('click', () => {
-  fillConnect({});
+  fillConnect(networks[0] ?? { host: 'irc.rogertp.es' });
   renderSaved();
   dialog('dlg-connect').showModal();
 });
@@ -801,7 +801,7 @@ async function start(): Promise<void> {
   const now = Date.now();
   for (const text of [
     'Te damos la bienvenida a Onda IRC.',
-    'Pulsa «Conectar» o escribe /server irc.libera.chat para empezar. Con /help verás los comandos principales.',
+    'Pulsa «Conectar» o escribe /server irc.rogertp.es para empezar. Con /help verás los comandos principales.',
     'Tus scripts de mIRC (.mrc) se gestionan desde «Scripts».',
   ]) welcome.lines.push({ time: now, kind: 'info', text });
   local.buffers.set(STATUS, welcome);
