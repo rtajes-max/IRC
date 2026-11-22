@@ -132,6 +132,41 @@ function renderTree(): void {
     }
     tree.append(net);
   }
+  renderSwitchbar();
+}
+
+/** Barra de ventanas: un botón por ventana abierta, como en los clientes IRC clásicos. */
+function renderSwitchbar(): void {
+  const bar = $('switchbar');
+  bar.replaceChildren();
+  const order: BufferType[] = ['status', 'channel', 'query', 'dcc', 'custom'];
+  for (const s of sessions.values()) {
+    const list = [...s.buffers.values()].sort((a, b) => order.indexOf(a.type) - order.indexOf(b.type) || a.name.localeCompare(b.name));
+    for (const b of list) {
+      const btn = el('button', 'sw', b.type === 'status' ? s.info.name : b.name);
+      btn.type = 'button';
+      btn.setAttribute('role', 'tab');
+      const on = isActive(s.info.sid, b.name);
+      btn.setAttribute('aria-selected', String(on));
+      if (on) btn.classList.add('active');
+      if (b.highlight) btn.classList.add('hl');
+      else if (b.unread) btn.classList.add('unread');
+      if (b.type === 'status') btn.classList.add('status');
+      btn.title = b.unread ? `${b.name === STATUS ? s.info.name : b.name} (${b.unread} sin leer)` : b.type === 'status' ? s.info.name : b.name;
+      btn.addEventListener('click', () => activate(s.info.sid, b.name));
+      btn.addEventListener('auxclick', (e) => {
+        if (e.button === 1 && !(s.info.sid === LOCAL && b.type !== 'custom')) void window.onda.invoke('closeBuffer', s.info.sid, b.name);
+      });
+      btn.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (s.info.sid === LOCAL && b.type !== 'custom') return;
+        showMenu(e.clientX, e.clientY, [
+          [b.type === 'status' ? 'Desconectar y cerrar' : b.type === 'channel' ? 'Salir del canal' : 'Cerrar', () => window.onda.invoke('closeBuffer', s.info.sid, b.name)],
+        ]);
+      });
+      bar.append(btn);
+    }
+  }
 }
 
 function stateLabel(st: SessionInfo['state']): string {
@@ -145,6 +180,7 @@ function renderHeader(): void {
   topic.replaceChildren();
   if (!b || !s) return;
   topic.append(el('span', 'name', b.type === 'status' ? s.info.name : b.name));
+  if (b.type === 'channel') topic.append(el('span', 'count', `[${b.nicks.length}]`));
   const text = el('span', 'text');
   if (b.type === 'status') text.textContent = s.info.sid === LOCAL ? 'Consola' : stateLabel(s.info.state);
   else appendFormatted(text, b.topic);
@@ -370,6 +406,7 @@ function renderTyping(): void {
 
 function applySettings(): void {
   document.documentElement.dataset.theme = settings.theme;
+  document.documentElement.dataset.layout = settings.layout;
   document.documentElement.style.setProperty('--size', settings.fontSize + 'px');
   log.classList.toggle('no-times', !settings.showTimestamps);
 }
@@ -666,7 +703,10 @@ function onUi(ev: UiEvent): void {
     case 'nicks': {
       const b = getBuffer(ev.sid, ev.buffer);
       if (b) b.nicks = ev.nicks;
-      if (isActive(ev.sid, ev.buffer)) renderNicks();
+      if (isActive(ev.sid, ev.buffer)) {
+        renderNicks();
+        renderHeader();
+      }
       break;
     }
     case 'topic': {
@@ -951,6 +991,7 @@ $('settings-form').addEventListener('submit', async () => {
     realname: String(f.get('realname')),
     quitMessage: String(f.get('quitMessage')),
     theme: String(f.get('theme')) as Settings['theme'],
+    layout: String(f.get('layout')) === 'modern' ? 'modern' : 'classic',
     fontSize: Math.min(24, Math.max(10, Number(f.get('fontSize')) || 14)),
     showTimestamps: f.has('showTimestamps'),
     logging: f.has('logging'),
@@ -1026,6 +1067,98 @@ $<HTMLTextAreaElement>('script-source').addEventListener('keydown', (e) => {
     const t = e.target as HTMLTextAreaElement;
     t.setRangeText('  ', t.selectionStart, t.selectionEnd, 'end');
   }
+});
+
+// Barra de menús y opciones de «Ver» (se recuerdan en este equipo)
+const view = { tree: true, nicks: true, switchbar: true, toolbar: true };
+try {
+  Object.assign(view, JSON.parse(localStorage.getItem('onda.ver') ?? '{}'));
+} catch {
+  /* sin preferencias guardadas */
+}
+function applyView(): void {
+  document.body.classList.toggle('hide-tree', !view.tree);
+  document.body.classList.toggle('hide-nicks', !view.nicks);
+  document.body.classList.toggle('hide-switchbar', !view.switchbar);
+  document.body.classList.toggle('hide-toolbar', !view.toolbar);
+  try {
+    localStorage.setItem('onda.ver', JSON.stringify(view));
+  } catch {
+    /* almacenamiento no disponible */
+  }
+}
+applyView();
+
+function menuItems(name: string): MenuItem[] {
+  const tick = (on: boolean, label: string) => (on ? '✓ ' : '\u2003 ') + label;
+  const toggle = (k: keyof typeof view, label: string): MenuItem => [tick(view[k], label), () => {
+    view[k] = !view[k];
+    applyView();
+  }];
+  const click = (id: string) => () => $(id).click();
+  switch (name) {
+    case 'archivo':
+      return [
+        ['Conectar…', click('btn-connect')],
+        ['Desconectar', () => send('/disconnect')],
+        ['Reconectar', () => send('/reconnect')],
+        null,
+        ['Cerrar ventana', () => active.sid !== LOCAL || active.buffer.startsWith('@') ? window.onda.invoke('closeBuffer', active.sid, active.buffer) : undefined],
+        ['Salir', () => window.close()],
+      ];
+    case 'ver':
+      return [
+        toggle('toolbar', 'Barra de botones'),
+        toggle('switchbar', 'Barra de ventanas'),
+        toggle('tree', 'Árbol de redes'),
+        toggle('nicks', 'Lista de nicks'),
+        null,
+        [tick(settings.showTimestamps, 'Mostrar la hora'), () => window.onda.invoke('settings:update', { showTimestamps: !settings.showTimestamps })],
+        null,
+        ...(['classic', 'dark', 'light'] as const).map((t): MenuItem => [
+          tick(settings.theme === t, { classic: 'Tema clásico', dark: 'Tema oscuro', light: 'Tema claro' }[t]),
+          () => window.onda.invoke('settings:update', { theme: t }),
+        ]),
+        null,
+        [tick(settings.layout === 'classic', 'Distribución clásica'), () => window.onda.invoke('settings:update', { layout: 'classic' })],
+        [tick(settings.layout === 'modern', 'Distribución moderna'), () => window.onda.invoke('settings:update', { layout: 'modern' })],
+      ];
+    case 'herramientas':
+      return [
+        ['Scripts…', click('btn-scripts')],
+        ['Lista de canales…', click('btn-list')],
+        ['Transferencias DCC…', click('btn-dcc')],
+        ['Buscar en los registros…', click('btn-logs')],
+        ['Buscar en esta ventana (Ctrl+F)', () => {
+          $('find').hidden = false;
+          $('find-input').focus();
+        }],
+        null,
+        ['Ajustes…', click('btn-settings')],
+      ];
+    case 'ventana': {
+      const out: MenuItem[] = [];
+      for (const s of sessions.values()) {
+        for (const b of s.buffers.values()) {
+          const label = b.type === 'status' ? s.info.name : `\u2003${b.name}`;
+          out.push([(isActive(s.info.sid, b.name) ? '✓ ' : '\u2003 ') + label, () => activate(s.info.sid, b.name)]);
+        }
+      }
+      return out;
+    }
+    default:
+      return [
+        ['Comandos (/help)', () => send('/help')],
+        ['Acerca de Onda IRC', () => send('/echo -a Onda IRC · cliente IRC con scripting compatible con mIRC')],
+      ];
+  }
+}
+document.querySelectorAll<HTMLButtonElement>('#menubar button').forEach((btn) => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const r = btn.getBoundingClientRect();
+    showMenu(r.left, r.bottom, menuItems(btn.dataset.menu ?? ''));
+  });
 });
 
 // Búsqueda en la conversación (Ctrl+F)

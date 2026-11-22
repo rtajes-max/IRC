@@ -387,6 +387,56 @@ describe('avisos de amigos (/notify)', () => {
   });
 });
 
+describe('abreviaturas de comandos', () => {
+  it('/q, /ns, /c y compañía equivalen a sus comandos, y un alias de script tiene prioridad', async () => {
+    const net = await import('node:net');
+    const got: string[] = [];
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8');
+      sock.on('error', () => undefined);
+      let buf = '';
+      sock.on('data', (d: string) => {
+        buf += d;
+        let i: number;
+        while ((i = buf.indexOf('\r\n')) !== -1) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          got.push(line);
+          if (line.startsWith('USER ')) sock.write(':srv 001 yo :Hola\r\n:yo!u@h JOIN #sala\r\n');
+        }
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-abr-')) });
+    const ev: UiEvent[] = [];
+    app.on('ui', (e: UiEvent) => ev.push(e));
+    const sid = app.connect({ name: 'L', host: '127.0.0.1', port, tls: false, nick: 'yo' });
+    await waitFor(() => ev.some((e) => e.type === 'buffer:add' && e.buffer === '#sala'), 'canal');
+    app.input(sid, '#sala', '/q ana hola ana');
+    app.input(sid, '#sala', '/ns info');
+    app.input(sid, '#sala', '/id s3creta');
+    app.input(sid, '#sala', '/w luis');
+    app.input(sid, '#sala', '/k pesado por pesado');
+    app.input(sid, '#sala', '/t Tema nuevo');
+    app.input(sid, '#sala', '/n');
+    app.input(sid, '#sala', '/c');
+    await waitFor(() => got.includes('NAMES #sala'), 'comandos enviados', 12000);
+    expect(ev.some((e) => e.type === 'buffer:add' && e.buffer === 'ana' && e.bufferType === 'query')).toBe(true);
+    expect(got).toEqual(expect.arrayContaining([
+      'PRIVMSG ana :hola ana', 'PRIVMSG NickServ :info', 'PRIVMSG NickServ :identify s3creta', 'WHOIS luis',
+      'KICK #sala pesado :por pesado', 'TOPIC #sala :Tema nuevo', 'NAMES #sala',
+    ]));
+    expect(ev.some((e) => e.type === 'buffer:clear' && e.buffer === '#sala')).toBe(true);
+    // Un alias propio llamado «q» sustituye a la abreviatura.
+    app.saveScript('mio', 'alias q { echo -a alias propio $1 }');
+    app.input(sid, '#sala', '/q prueba');
+    expect(ev.some((e) => e.type === 'line' && e.line.text === 'alias propio prueba')).toBe(true);
+    app.shutdown();
+    srv.close();
+  }, 20000);
+});
+
 describe('ventanas personalizadas', () => {
   it('/window, /aline, /echo @ventana, on INPUT y cierre', () => {
     const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-win-')) });

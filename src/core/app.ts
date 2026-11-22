@@ -48,7 +48,8 @@ const DEFAULT_SETTINGS: Settings = {
   username: 'onda',
   realname: 'Usuario de Onda IRC',
   quitMessage: 'Onda IRC',
-  theme: 'dark',
+  theme: 'classic',
+  layout: 'classic',
   fontSize: 14,
   showTimestamps: true,
   logging: true,
@@ -56,6 +57,13 @@ const DEFAULT_SETTINGS: Settings = {
   sendTyping: true,
   ignore: [],
   notify: [],
+};
+
+/** Abreviaturas de comandos: `/q nick` equivale a `/query nick`, `/ns texto` a `/msg NickServ texto`, etc. */
+export const COMMAND_SHORTCUTS: Record<string, string> = {
+  q: 'query', p: 'part', w: 'whois', wi: 'whois', k: 'kick', n: 'names', c: 'clear', s: 'server', m: 'msg', t: 'topic',
+  a: 'away', i: 'ignore', dop: 'deop', v: 'voice', dv: 'devoice', b: 'ban', l: 'list', id: 'msg NickServ identify',
+  ns: 'msg NickServ', cs: 'msg ChanServ', send: 'dcc send', chat: 'dcc chat', exit: 'quit', bye: 'quit',
 };
 
 /** Cifrado de contraseñas guardadas (en la aplicación lo aporta el almacén de claves del sistema). */
@@ -712,7 +720,11 @@ export class AppCore extends EventEmitter implements MslHost {
     else this.error(s?.sid ?? LOCAL, STATUS, `Comando desconocido o sin conexión: ${line.split(' ')[0]}`);
   }
 
-  command(name: string, args: string, ctx: MslContext): boolean {
+  command(nameIn: string, argsIn: string, ctx: MslContext): boolean {
+    // Abreviaturas de los comandos más usados (los alias de los scripts tienen prioridad sobre ellas).
+    const short = COMMAND_SHORTCUTS[nameIn];
+    const name = short ? short.split(' ')[0] : nameIn;
+    const args = short && short.includes(' ') ? `${short.slice(short.indexOf(' ') + 1)} ${argsIn}`.trim() : argsIn;
     const s = this.sessionOf(ctx);
     const sid = s?.sid ?? LOCAL;
     const here = ctx.target ?? (this.active.sid === sid ? this.active.buffer : STATUS);
@@ -893,6 +905,10 @@ export class AppCore extends EventEmitter implements MslHost {
         if (!online()) return fail('No estás conectado');
         s!.client.send(`WHOIS ${toks[0] ?? s!.client.nick}`);
         return true;
+      case 'names':
+        if (!online()) return fail('No estás conectado');
+        s!.client.send(`NAMES ${toks[0] ?? chan}`.trim());
+        return true;
       case 'away':
         if (!online()) return fail('No estás conectado');
         s!.client.send(args ? `AWAY :${args}` : 'AWAY');
@@ -982,6 +998,7 @@ export class AppCore extends EventEmitter implements MslHost {
       case 'help':
         for (const l of [
           'Comandos principales: /server [-e] host[:puerto] · /join #canal · /part · /msg nick texto · /query nick · /me acción',
+          'Abreviaturas: /j join · /p part · /q query · /m msg · /w whois · /k kick · /t topic · /n names · /c clear · /s server · /a away · /l list · /ns y /cs (NickServ, ChanServ) · /id contraseña',
           '/nick · /register contraseña · /ignore nick · /notify nick · /list · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
           'Scripts mIRC: /load archivo.mrc · /unload archivo.mrc · // evalúa identificadores (p. ej. //echo -a $me)',
         ]) this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'info', l);

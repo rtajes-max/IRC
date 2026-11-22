@@ -30,6 +30,8 @@ export interface Settings {
   realname: string;
   quitMessage: string;
   theme: 'dark' | 'light' | 'classic';
+  /** Distribución de la ventana: clásica (compacta, estilo cliente IRC tradicional) o moderna. */
+  layout: 'classic' | 'modern';
   fontSize: number;
   showTimestamps: boolean;
   logging: boolean;

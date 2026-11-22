@@ -8,6 +8,13 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <nav id="menubar" aria-label="Menú principal">
+    <button type="button" data-menu="archivo">Archivo</button>
+    <button type="button" data-menu="ver">Ver</button>
+    <button type="button" data-menu="herramientas">Herramientas</button>
+    <button type="button" data-menu="ventana">Ventana</button>
+    <button type="button" data-menu="ayuda">Ayuda</button>
+  </nav>
   <header id="toolbar">
     <span class="brand">Onda IRC</span>
     <button id="btn-connect" class="primary">Conectar</button>
@@ -18,6 +25,7 @@
     <span class="spacer"></span>
     <button id="btn-settings">Ajustes</button>
   </header>
+  <div id="switchbar" role="tablist" aria-label="Ventanas abiertas"></div>
   <div id="layout">
     <nav id="tree" aria-label="Redes y canales"></nav>
     <main id="chat">
@@ -113,6 +121,9 @@
         <label>Mensaje al salir <input name="quitMessage"></label>
         <label>Tema
           <select name="theme"><option value="dark">Oscuro</option><option value="light">Claro</option><option value="classic">Clásico</option></select>
+        </label>
+        <label>Distribución
+          <select name="layout"><option value="classic">Clásica (compacta)</option><option value="modern">Moderna</option></select>
         </label>
         <label>Tamaño de letra <input name="fontSize" type="number" min="10" max="24"></label>
         <label class="check"><input name="showTimestamps" type="checkbox"> Mostrar la hora</label>
