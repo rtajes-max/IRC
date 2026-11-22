@@ -11,6 +11,7 @@
   <nav id="menubar" aria-label="Menú principal">
     <button type="button" data-menu="archivo">Archivo</button>
     <button type="button" data-menu="ver">Ver</button>
+    <button type="button" data-menu="canal">Canal</button>
     <button type="button" data-menu="herramientas">Herramientas</button>
     <button type="button" data-menu="ventana">Ventana</button>
     <button type="button" data-menu="ayuda">Ayuda</button>
@@ -22,6 +23,11 @@
     <button id="btn-dcc">Transferencias <span id="dcc-badge" class="badge" hidden></span></button>
     <button id="btn-list">Canales</button>
     <button id="btn-logs">Registros</button>
+    <button id="btn-find" title="Buscar en las conversaciones (Ctrl+F)">Buscar</button>
+    <span class="sep" aria-hidden="true"></span>
+    <button id="btn-cascade" title="Colocar las ventanas en cascada">Cascada</button>
+    <button id="btn-tile" title="Repartir las ventanas en mosaico">Mosaico</button>
+    <button id="btn-max" title="Maximizar o restaurar las ventanas">Maximizar</button>
     <span class="spacer"></span>
     <button id="btn-settings">Ajustes</button>
   </header>
@@ -29,16 +35,9 @@
   <div id="layout">
     <nav id="tree" aria-label="Redes y canales"></nav>
     <main id="chat">
-      <div id="topic"></div>
-      <div id="find" hidden><input id="find-input" placeholder="Buscar en esta conversación" aria-label="Buscar en esta conversación"><span id="find-count"></span><button id="find-close" type="button" aria-label="Cerrar búsqueda">×</button></div>
-      <div id="log" role="log" aria-live="polite"></div>
-      <div id="typing"></div>
-      <form id="input-form">
-        <span id="my-nick"></span>
-        <textarea id="input" rows="1" placeholder="Escribe un mensaje o un comando (/help)" autocomplete="off" spellcheck="true"></textarea>
-      </form>
+      <div id="find" hidden><input id="find-input" placeholder="Buscar en las conversaciones" aria-label="Buscar en las conversaciones"><span id="find-count"></span><button id="find-close" type="button" aria-label="Cerrar búsqueda">×</button></div>
+      <div id="desktop"></div>
     </main>
-    <aside id="nicks" aria-label="Usuarios del canal"></aside>
   </div>
   <div id="context-menu" hidden></div>
   <div id="script-dialogs"></div>
@@ -122,8 +121,8 @@
         <label>Tema
           <select name="theme"><option value="dark">Oscuro</option><option value="light">Claro</option><option value="classic">Clásico</option></select>
         </label>
-        <label>Distribución
-          <select name="layout"><option value="classic">Clásica (compacta)</option><option value="modern">Moderna</option></select>
+        <label>Aspecto del texto
+          <select name="layout"><option value="modern">Texto amplio</option><option value="classic">Texto compacto (estilo IRC)</option></select>
         </label>
         <label>Tamaño de letra <input name="fontSize" type="number" min="10" max="24"></label>
         <label class="check"><input name="showTimestamps" type="checkbox"> Mostrar la hora</label>

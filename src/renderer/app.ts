@@ -47,8 +47,27 @@ const dccs = new Map<string, DccInfo>();
 const history: string[] = [];
 let historyPos = -1;
 
-const log = $('log');
-const input = $<HTMLTextAreaElement>('input');
+/** Ventana flotante de un búfer (canal, privado, estado…), como las de mIRC. */
+interface Win {
+  sid: string;
+  name: string;
+  root: HTMLElement;
+  title: HTMLElement;
+  topic: HTMLElement;
+  log: HTMLElement;
+  nicks: HTMLElement;
+  typing: HTMLElement;
+  mynick: HTMLElement;
+  input: HTMLTextAreaElement;
+}
+const wins = new Map<string, Win>();
+const winId = (sid: string, buffer: string) => `${sid}\u0000${key(buffer)}`;
+const winOf = (sid: string, buffer: string) => wins.get(winId(sid, buffer));
+const desktop = $('desktop');
+// Elementos de la ventana activa: los usan el completado, la inserción de texto y la búsqueda.
+let log: HTMLElement = el('div');
+let input: HTMLTextAreaElement = el('textarea');
+let zTop = 10;
 
 // ------------------------------------------------------------------ estado
 
@@ -79,20 +98,232 @@ function getBuffer(sid: string, name: string, create?: BufferType): BufferState 
 const activeBuffer = () => getBuffer(active.sid, active.buffer);
 const isActive = (sid: string, buffer: string) => active.sid === sid && key(active.buffer) === key(buffer);
 
-function activate(sid: string, buffer: string): void {
-  if (!getBuffer(sid, buffer)) return;
-  active = { sid, buffer: getBuffer(sid, buffer)!.name };
-  const b = activeBuffer()!;
+function activate(sid: string, buffer: string, focus = true): void {
+  const b = getBuffer(sid, buffer);
+  if (!b) return;
+  const w = ensureWin(sid, b);
+  const changed = !isActive(sid, b.name);
+  active = { sid, buffer: b.name };
   b.unread = 0;
   b.highlight = false;
-  void window.onda.invoke('setActive', sid, b.name);
+  w.root.classList.remove('min');
+  w.root.style.zIndex = String(++zTop);
+  for (const o of wins.values()) o.root.classList.toggle('active', o === w);
+  log = w.log;
+  input = w.input;
+  if (changed) void window.onda.invoke('setActive', sid, b.name);
   if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
   renderTree();
-  renderLog();
-  renderHeader();
-  renderNicks();
-  renderTyping();
-  if ($('find').hidden) input.focus();
+  const s = sessions.get(sid);
+  document.title = `${b.type === 'status' ? s?.info.name ?? 'Onda' : b.name} · Onda IRC`;
+  if (desktop.classList.contains('maxed')) w.log.scrollTop = w.log.scrollHeight;
+  if (focus && $('find').hidden) input.focus();
+}
+
+// --------------------------------------------------------------- ventanas
+
+interface Geo { x: number; y: number; w: number; h: number }
+let savedGeo: Record<string, Geo> = {};
+try {
+  savedGeo = JSON.parse(localStorage.getItem('onda.ventanas') ?? '{}');
+  if (localStorage.getItem('onda.max') === '1') desktop.classList.add('maxed');
+} catch {
+  /* sin posiciones guardadas */
+}
+let geoTimer = 0;
+function saveGeo(): void {
+  window.clearTimeout(geoTimer);
+  geoTimer = window.setTimeout(() => {
+    try {
+      localStorage.setItem('onda.ventanas', JSON.stringify(savedGeo));
+      localStorage.setItem('onda.max', desktop.classList.contains('maxed') ? '1' : '0');
+    } catch {
+      /* almacenamiento no disponible */
+    }
+  }, 300);
+}
+
+function placeWin(w: Win, g: Geo): void {
+  const dw = Math.max(320, desktop.clientWidth);
+  const dh = Math.max(200, desktop.clientHeight);
+  const width = Math.min(Math.max(260, g.w), dw);
+  const height = Math.min(Math.max(150, g.h), dh);
+  w.root.style.left = Math.max(0, Math.min(g.x, dw - 80)) + 'px';
+  w.root.style.top = Math.max(0, Math.min(g.y, dh - 30)) + 'px';
+  w.root.style.width = width + 'px';
+  w.root.style.height = height + 'px';
+}
+
+function rememberWin(w: Win): void {
+  if (desktop.classList.contains('maxed') || w.root.classList.contains('min')) return;
+  savedGeo[key(w.name === STATUS ? `*${w.sid === LOCAL ? 'onda' : 'estado'}` : w.name)] = {
+    x: w.root.offsetLeft, y: w.root.offsetTop, w: w.root.offsetWidth, h: w.root.offsetHeight,
+  };
+  saveGeo();
+}
+
+function setMaxed(on: boolean): void {
+  desktop.classList.toggle('maxed', on);
+  $('btn-max').textContent = on ? 'Restaurar' : 'Maximizar';
+  saveGeo();
+  for (const w of wins.values()) w.log.scrollTop = w.log.scrollHeight;
+}
+
+/** Coloca las ventanas visibles en cascada, en mosaico (cuadrícula), en columnas o en filas. */
+function arrange(mode: 'cascade' | 'grid' | 'columns' | 'rows'): void {
+  setMaxed(false);
+  const list = [...wins.values()].filter((w) => !w.root.classList.contains('min'));
+  if (!list.length) return;
+  const dw = desktop.clientWidth;
+  const dh = desktop.clientHeight;
+  if (mode === 'cascade') {
+    list.forEach((w, n) => {
+      const off = (n % 8) * 30;
+      placeWin(w, { x: off, y: off, w: Math.round(dw * 0.66), h: Math.round(dh * 0.7) });
+      w.root.style.zIndex = String(++zTop);
+    });
+  } else {
+    const cols = mode === 'columns' ? list.length : mode === 'rows' ? 1 : Math.ceil(Math.sqrt(list.length));
+    const rows = Math.ceil(list.length / cols);
+    list.forEach((w, n) => {
+      const r = Math.floor(n / cols);
+      const inRow = r === rows - 1 ? list.length - cols * (rows - 1) : cols;
+      const cw = dw / inRow;
+      placeWin(w, { x: Math.round((n % cols) * cw), y: Math.round(r * (dh / rows)), w: Math.floor(cw), h: Math.floor(dh / rows) });
+    });
+  }
+  for (const w of list) {
+    rememberWin(w);
+    w.log.scrollTop = w.log.scrollHeight;
+  }
+  const cur = winOf(active.sid, active.buffer);
+  if (cur) cur.root.style.zIndex = String(++zTop);
+}
+
+function closeWinAction(w: Win): void {
+  const b = getBuffer(w.sid, w.name);
+  // La consola y las ventanas de estado no se cierran con la X (sería desconectar): se minimizan.
+  if (!b || b.type === 'status') minimizeWin(w);
+  else void window.onda.invoke('closeBuffer', w.sid, w.name);
+}
+
+function minimizeWin(w: Win): void {
+  rememberWin(w);
+  w.root.classList.add('min');
+  if (isActive(w.sid, w.name)) {
+    const next = [...wins.values()].filter((o) => !o.root.classList.contains('min')).sort((a, b) => Number(b.root.style.zIndex) - Number(a.root.style.zIndex))[0];
+    if (next) activate(next.sid, next.name);
+    else renderTree();
+  }
+}
+
+function ensureWin(sid: string, b: BufferState): Win {
+  const id = winId(sid, b.name);
+  const had = wins.get(id);
+  if (had) return had;
+  const root = el('section', 'win');
+  root.dataset.type = b.type;
+  const bar = el('header', 'win-bar');
+  const title = el('span', 'win-title');
+  const topic = el('span', 'win-topic');
+  const mk = (cls: string, glyph: string, label: string, fn: () => void) => {
+    const btn = el('button', 'win-btn ' + cls, glyph);
+    btn.type = 'button';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fn();
+    });
+    return btn;
+  };
+  const body = el('div', 'win-body');
+  const wlog = el('div', 'log');
+  wlog.setAttribute('role', 'log');
+  const nicks = el('aside', 'nicks');
+  nicks.setAttribute('aria-label', 'Usuarios del canal');
+  body.append(wlog, nicks);
+  const typing = el('div', 'typing');
+  const form = el('form', 'input-form');
+  const mynick = el('span', 'my-nick');
+  const winput = el('textarea', 'input');
+  winput.rows = 1;
+  winput.placeholder = 'Mensaje o /comando';
+  winput.autocomplete = 'off';
+  winput.spellcheck = true;
+  form.append(mynick, winput);
+  form.addEventListener('submit', (e) => e.preventDefault());
+  const w: Win = { sid, name: b.name, root, title, topic, log: wlog, nicks, typing, mynick, input: winput };
+  bar.append(
+    title, topic,
+    mk('min', '–', 'Minimizar', () => minimizeWin(w)),
+    mk('max', '□', 'Maximizar o restaurar', () => {
+      activate(sid, b.name);
+      setMaxed(!desktop.classList.contains('maxed'));
+    }),
+    mk('close', '×', b.type === 'status' ? 'Minimizar' : b.type === 'channel' ? 'Salir del canal' : 'Cerrar', () => closeWinAction(w)),
+  );
+  root.append(bar, body, typing, form);
+  wins.set(id, w);
+
+  // Posición: la guardada para ese nombre o, si no, en cascada.
+  const n = wins.size - 1;
+  const saved = savedGeo[key(b.name === STATUS ? `*${sid === LOCAL ? 'onda' : 'estado'}` : b.name)];
+  desktop.append(root);
+  placeWin(w, saved ?? {
+    x: 16 + (n % 8) * 28, y: 12 + (n % 8) * 28,
+    w: Math.round(Math.max(420, desktop.clientWidth * 0.62)), h: Math.round(Math.max(260, desktop.clientHeight * 0.68)),
+  });
+  root.style.zIndex = String(++zTop);
+
+  // Activar al pulsar en cualquier parte; arrastrar por la barra de título.
+  root.addEventListener('pointerdown', () => {
+    if (!isActive(sid, b.name)) activate(sid, b.name, false);
+  });
+  root.addEventListener('mouseup', (e) => {
+    const t = e.target as HTMLElement;
+    if (window.getSelection()?.isCollapsed && !t.closest('button, a, textarea, input, select')) winput.focus();
+    rememberWin(w); // también recoge los cambios de tamaño hechos con el tirador
+  });
+  bar.addEventListener('dblclick', (e) => {
+    if (!(e.target as HTMLElement).closest('button')) setMaxed(!desktop.classList.contains('maxed'));
+  });
+  bar.addEventListener('pointerdown', (e) => {
+    if ((e.target as HTMLElement).closest('button') || desktop.classList.contains('maxed')) return;
+    const dx = e.clientX - root.offsetLeft;
+    const dy = e.clientY - root.offsetTop;
+    const move = (m: PointerEvent) => {
+      root.style.left = Math.max(0, Math.min(desktop.clientWidth - 80, m.clientX - dx)) + 'px';
+      root.style.top = Math.max(0, Math.min(desktop.clientHeight - 30, m.clientY - dy)) + 'px';
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      rememberWin(w);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+  // Clic derecho en la conversación: popups de los scripts para canal, privado o estado.
+  wlog.addEventListener('contextmenu', async (e) => {
+    if ((e.target as HTMLElement).closest('a, .nick')) return;
+    e.preventDefault();
+    const { clientX, clientY } = e;
+    const items = await scriptItems();
+    if (items.length) showMenu(clientX, clientY, items);
+  });
+  attachInput(w);
+  renderHeader(w);
+  renderLog(w);
+  renderNicks(w);
+  return w;
+}
+
+function removeWin(sid: string, buffer: string): void {
+  const w = winOf(sid, buffer);
+  if (!w) return;
+  w.root.remove();
+  wins.delete(winId(sid, buffer));
 }
 
 // --------------------------------------------------------------- dibujado
@@ -153,6 +384,7 @@ function renderSwitchbar(): void {
       else if (b.unread) btn.classList.add('unread');
       if (b.type === 'status') btn.classList.add('status');
       btn.title = b.unread ? `${b.name === STATUS ? s.info.name : b.name} (${b.unread} sin leer)` : b.type === 'status' ? s.info.name : b.name;
+      if (winOf(s.info.sid, b.name)?.root.classList.contains('min')) btn.classList.add('minimized');
       btn.addEventListener('click', () => activate(s.info.sid, b.name));
       btn.addEventListener('auxclick', (e) => {
         if (e.button === 1 && !(s.info.sid === LOCAL && b.type !== 'custom')) void window.onda.invoke('closeBuffer', s.info.sid, b.name);
@@ -173,26 +405,25 @@ function stateLabel(st: SessionInfo['state']): string {
   return { connecting: 'conectando', connected: 'conectado', disconnected: 'desconectado', local: 'local' }[st];
 }
 
-function renderHeader(): void {
-  const b = activeBuffer();
-  const s = sessions.get(active.sid);
-  const topic = $('topic');
-  topic.replaceChildren();
+function renderHeader(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+  if (!w) return;
+  const b = getBuffer(w.sid, w.name);
+  const s = sessions.get(w.sid);
+  w.title.replaceChildren();
+  w.topic.replaceChildren();
   if (!b || !s) return;
-  topic.append(el('span', 'name', b.type === 'status' ? s.info.name : b.name));
-  if (b.type === 'channel') topic.append(el('span', 'count', `[${b.nicks.length}]`));
-  const text = el('span', 'text');
-  if (b.type === 'status') text.textContent = s.info.sid === LOCAL ? 'Consola' : stateLabel(s.info.state);
-  else appendFormatted(text, b.topic);
-  topic.append(text);
-  topic.title = stripFormatting(b.topic);
-  $('my-nick').textContent = s.info.sid === LOCAL ? settings.nick : s.info.nick;
-  document.title = `${b.type === 'status' ? s.info.name : b.name} · Onda IRC`;
+  w.title.append(b.type === 'status' ? s.info.name : b.name);
+  if (b.type === 'channel') w.title.append(el('span', 'count', `[${b.nicks.length}]`));
+  if (b.type === 'status') w.topic.textContent = s.info.sid === LOCAL ? 'Consola' : stateLabel(s.info.state);
+  else appendFormatted(w.topic, b.topic);
+  w.topic.title = stripFormatting(b.topic);
+  w.mynick.textContent = s.info.sid === LOCAL ? settings.nick : s.info.nick;
 }
 
-function renderNicks(): void {
-  const b = activeBuffer();
-  const pane = $('nicks');
+function renderNicks(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+  if (!w) return;
+  const b = getBuffer(w.sid, w.name);
+  const pane = w.nicks;
   pane.hidden = !b || b.type !== 'channel';
   pane.replaceChildren();
   if (!b || b.type !== 'channel') return;
@@ -381,21 +612,23 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
   return row;
 }
 
-function renderLog(): void {
-  const b = activeBuffer();
-  log.replaceChildren();
+function renderLog(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+  if (!w) return;
+  const b = getBuffer(w.sid, w.name);
+  w.log.replaceChildren();
   if (!b) return;
-  if (!b.lines.length) log.append(el('div', 'empty', 'Aún no hay mensajes aquí.'));
+  if (!b.lines.length) w.log.append(el('div', 'empty', 'Aún no hay mensajes aquí.'));
   const frag = document.createDocumentFragment();
   for (const l of b.lines) frag.append(lineRow(b, l));
-  log.append(frag);
-  log.scrollTop = log.scrollHeight;
+  w.log.append(frag);
+  w.log.scrollTop = w.log.scrollHeight;
 }
 
-function renderTyping(): void {
-  const b = activeBuffer();
+function renderTyping(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+  if (!w) return;
+  const b = getBuffer(w.sid, w.name);
   const names = b ? [...b.typing.keys()] : [];
-  $('typing').textContent = !names.length
+  w.typing.textContent = !names.length
     ? ''
     : names.length === 1
       ? `${names[0]} está escribiendo…`
@@ -408,7 +641,7 @@ function applySettings(): void {
   document.documentElement.dataset.theme = settings.theme;
   document.documentElement.dataset.layout = settings.layout;
   document.documentElement.style.setProperty('--size', settings.fontSize + 'px');
-  log.classList.toggle('no-times', !settings.showTimestamps);
+  desktop.classList.toggle('no-times', !settings.showTimestamps);
 }
 
 function renderDcc(): void {
@@ -644,19 +877,21 @@ function onUi(ev: UiEvent): void {
     case 'session': {
       ensureSession({ sid: ev.sid, name: ev.name, state: ev.state, nick: ev.nick });
       renderTree();
-      if (active.sid === ev.sid) renderHeader();
+      for (const w of wins.values()) if (w.sid === ev.sid) renderHeader(w);
       break;
     }
     case 'session:remove':
+      for (const w of [...wins.values()]) if (w.sid === ev.sid) removeWin(w.sid, w.name);
       sessions.delete(ev.sid);
       if (active.sid === ev.sid) activate(LOCAL, STATUS);
       else renderTree();
       break;
     case 'buffer:add':
-      getBuffer(ev.sid, ev.buffer, ev.bufferType);
+      ensureWin(ev.sid, getBuffer(ev.sid, ev.buffer, ev.bufferType)!);
       renderTree();
       break;
     case 'buffer:remove':
+      removeWin(ev.sid, ev.buffer);
       sessions.get(ev.sid)?.buffers.delete(key(ev.buffer));
       if (isActive(ev.sid, ev.buffer)) activate(ev.sid, STATUS);
       else renderTree();
@@ -664,7 +899,7 @@ function onUi(ev: UiEvent): void {
     case 'buffer:clear': {
       const b = getBuffer(ev.sid, ev.buffer);
       if (b) b.lines = [];
-      if (isActive(ev.sid, ev.buffer)) renderLog();
+      renderLog(winOf(ev.sid, ev.buffer));
       break;
     }
     case 'activate':
@@ -675,13 +910,15 @@ function onUi(ev: UiEvent): void {
       const sid = getBuffer(ev.sid, ev.buffer) || getBuffer(ev.sid, STATUS) ? ev.sid : LOCAL;
       b.lines.push(ev.line);
       if (b.lines.length > MAX_LINES) b.lines.splice(0, b.lines.length - MAX_LINES);
-      if (isActive(sid, b.name)) {
-        const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
-        log.querySelector('.empty')?.remove();
-        log.append(lineRow(b, ev.line));
-        while (log.childElementCount > MAX_LINES) log.firstElementChild!.remove();
-        if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
-        if (atBottom || ev.line.self) log.scrollTop = log.scrollHeight;
+      const lw = winOf(sid, b.name);
+      if (lw) {
+        const wl = lw.log;
+        const atBottom = wl.scrollHeight - wl.scrollTop - wl.clientHeight < 60;
+        wl.querySelector('.empty')?.remove();
+        wl.append(lineRow(b, ev.line));
+        while (wl.childElementCount > MAX_LINES) wl.firstElementChild!.remove();
+        if (findQuery && isActive(sid, b.name)) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
+        if (atBottom || ev.line.self) wl.scrollTop = wl.scrollHeight;
       }
       const counts = ['msg', 'action', 'notice'].includes(ev.line.kind) && !ev.line.self && !ev.line.history;
       if (counts && (!isActive(sid, b.name) || !document.hasFocus())) {
@@ -703,16 +940,14 @@ function onUi(ev: UiEvent): void {
     case 'nicks': {
       const b = getBuffer(ev.sid, ev.buffer);
       if (b) b.nicks = ev.nicks;
-      if (isActive(ev.sid, ev.buffer)) {
-        renderNicks();
-        renderHeader();
-      }
+      renderNicks(winOf(ev.sid, ev.buffer));
+      renderHeader(winOf(ev.sid, ev.buffer));
       break;
     }
     case 'topic': {
       const b = getBuffer(ev.sid, ev.buffer);
       if (b) b.topic = ev.topic;
-      if (isActive(ev.sid, ev.buffer)) renderHeader();
+      renderHeader(winOf(ev.sid, ev.buffer));
       break;
     }
     case 'typing': {
@@ -723,10 +958,10 @@ function onUi(ev: UiEvent): void {
       if (ev.state === 'active' || ev.state === 'paused') {
         b.typing.set(ev.nick, window.setTimeout(() => {
           b.typing.delete(ev.nick);
-          if (isActive(ev.sid, ev.buffer)) renderTyping();
+          renderTyping(winOf(ev.sid, ev.buffer));
         }, ev.state === 'active' ? 6000 : 30000));
       }
-      if (isActive(ev.sid, ev.buffer)) renderTyping();
+      renderTyping(winOf(ev.sid, ev.buffer));
       break;
     }
     case 'react': {
@@ -735,8 +970,9 @@ function onUi(ev: UiEvent): void {
       const list = b.reactions.get(ev.msgid) ?? [];
       list.push(ev.emoji);
       b.reactions.set(ev.msgid, list);
-      if (isActive(ev.sid, ev.buffer)) {
-        const row = [...log.querySelectorAll<HTMLElement>('.row')].find((r) => r.dataset.msgid === ev.msgid);
+      const rw = winOf(ev.sid, ev.buffer);
+      if (rw) {
+        const row = [...rw.log.querySelectorAll<HTMLElement>('.row')].find((r) => r.dataset.msgid === ev.msgid);
         row?.querySelector('.body')?.append(el('span', 'react', ev.emoji));
       }
       break;
@@ -758,9 +994,11 @@ function onUi(ev: UiEvent): void {
     case 'settings':
       settings = ev.settings;
       applySettings();
-      renderHeader();
-      renderLog();
-      renderNicks();
+      for (const w of wins.values()) {
+        renderHeader(w);
+        renderLog(w);
+        renderNicks(w);
+      }
       break;
   }
 }
@@ -780,6 +1018,7 @@ function insertText(text: string): void {
 function autosize(): void {
   input.style.height = 'auto';
   input.style.height = Math.min(140, input.scrollHeight + 2) + 'px';
+  input.style.overflowY = input.scrollHeight > 140 ? 'auto' : 'hidden';
 }
 
 let typingSent = 0;
@@ -823,48 +1062,45 @@ function tabComplete(): void {
   input.setSelectionRange(caret, caret);
 }
 
-input.addEventListener('keydown', (e) => {
-  if (e.key !== 'Tab') completion = null;
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    const text = input.value;
-    if (!text.trim()) return;
-    history.unshift(text);
-    if (history.length > 200) history.pop();
-    historyPos = -1;
-    input.value = '';
+/** Teclado de la línea de escritura de una ventana: enviar, historial, completado y aviso de escritura. */
+function attachInput(w: Win): void {
+  const box = w.input;
+  box.addEventListener('focus', () => {
+    if (!isActive(w.sid, w.name)) activate(w.sid, w.name, false);
+  });
+  box.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') completion = null;
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const text = box.value;
+      if (!text.trim()) return;
+      history.unshift(text);
+      if (history.length > 200) history.pop();
+      historyPos = -1;
+      box.value = '';
+      autosize();
+      notifyTyping('done');
+      send(text);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      tabComplete();
+    } else if (e.key === 'ArrowUp' && !box.value.includes('\n') && historyPos < history.length - 1) {
+      e.preventDefault();
+      box.value = history[++historyPos];
+      autosize();
+    } else if (e.key === 'ArrowDown' && historyPos >= 0 && !box.value.includes('\n')) {
+      e.preventDefault();
+      historyPos--;
+      box.value = historyPos >= 0 ? history[historyPos] : '';
+      autosize();
+    }
+  });
+  box.addEventListener('input', () => {
     autosize();
-    notifyTyping('done');
-    send(text);
-  } else if (e.key === 'Tab') {
-    e.preventDefault();
-    tabComplete();
-  } else if (e.key === 'ArrowUp' && !input.value.includes('\n') && historyPos < history.length - 1) {
-    e.preventDefault();
-    input.value = history[++historyPos];
-    autosize();
-  } else if (e.key === 'ArrowDown' && historyPos >= 0 && !input.value.includes('\n')) {
-    e.preventDefault();
-    historyPos--;
-    input.value = historyPos >= 0 ? history[historyPos] : '';
-    autosize();
-  }
-});
-input.addEventListener('input', () => {
-  autosize();
-  if (input.value && !input.value.startsWith('/')) notifyTyping('active');
-  else notifyTyping('done');
-});
-$('input-form').addEventListener('submit', (e) => e.preventDefault());
-
-// Clic derecho en la conversación: popups de los scripts para canal, privado o estado.
-log.addEventListener('contextmenu', async (e) => {
-  if ((e.target as HTMLElement).closest('a, .nick')) return;
-  e.preventDefault();
-  const { clientX, clientY } = e;
-  const items = await scriptItems();
-  if (items.length) showMenu(clientX, clientY, items);
-});
+    if (box.value && !box.value.startsWith('/')) notifyTyping('active');
+    else notifyTyping('done');
+  });
+}
 
 document.addEventListener('click', (e) => {
   const menu = $('context-menu');
@@ -1120,8 +1356,7 @@ function menuItems(name: string): MenuItem[] {
           () => window.onda.invoke('settings:update', { theme: t }),
         ]),
         null,
-        [tick(settings.layout === 'classic', 'Distribución clásica'), () => window.onda.invoke('settings:update', { layout: 'classic' })],
-        [tick(settings.layout === 'modern', 'Distribución moderna'), () => window.onda.invoke('settings:update', { layout: 'modern' })],
+        [tick(settings.layout === 'classic', 'Texto compacto (estilo IRC)'), () => window.onda.invoke('settings:update', { layout: settings.layout === 'classic' ? 'modern' : 'classic' })],
       ];
     case 'herramientas':
       return [
@@ -1136,8 +1371,38 @@ function menuItems(name: string): MenuItem[] {
         null,
         ['Ajustes…', click('btn-settings')],
       ];
+    case 'canal':
+      return [
+        ['Entrar en un canal…', () => insertText('/join #')],
+        ['Lista de canales…', click('btn-list')],
+        null,
+        ['Salir de este canal', () => send('/part')],
+        ['Cambiar el tema…', () => insertText('/topic ')],
+        ['Ver quién hay (/names)', () => send('/names')],
+        null,
+        ['Conversación privada…', () => insertText('/query ')],
+        ['Ausente…', () => insertText('/away ')],
+        ['Volver (quitar ausencia)', () => send('/back')],
+        ['Cambiar de nick…', () => insertText('/nick ')],
+        ['Registrar mi nick…', () => insertText('/register ')],
+      ];
     case 'ventana': {
-      const out: MenuItem[] = [];
+      const maxed = desktop.classList.contains('maxed');
+      const out: MenuItem[] = [
+        ['Cascada', () => arrange('cascade')],
+        ['Mosaico', () => arrange('grid')],
+        ['Mosaico en columnas', () => arrange('columns')],
+        ['Mosaico en filas', () => arrange('rows')],
+        [maxed ? 'Restaurar' : 'Maximizar', () => setMaxed(!maxed)],
+        ['Minimizar todas', () => {
+          for (const w of [...wins.values()]) {
+            rememberWin(w);
+            w.root.classList.add('min');
+          }
+          renderTree();
+        }],
+        null,
+      ];
       for (const s of sessions.values()) {
         for (const b of s.buffers.values()) {
           const label = b.type === 'status' ? s.info.name : `\u2003${b.name}`;
@@ -1161,11 +1426,19 @@ document.querySelectorAll<HTMLButtonElement>('#menubar button').forEach((btn) =>
   });
 });
 
+$('btn-cascade').addEventListener('click', () => arrange('cascade'));
+$('btn-tile').addEventListener('click', () => arrange('grid'));
+$('btn-max').addEventListener('click', () => setMaxed(!desktop.classList.contains('maxed')));
+$('btn-find').addEventListener('click', () => {
+  $('find').hidden = false;
+  $('find-input').focus();
+});
+
 // Búsqueda en la conversación (Ctrl+F)
 function applyFind(): void {
   findQuery = $<HTMLInputElement>('find-input').value.trim().toLowerCase();
-  log.classList.toggle('finding', !!findQuery);
-  renderLog();
+  desktop.classList.toggle('finding', !!findQuery);
+  for (const w of wins.values()) renderLog(w);
   const b = activeBuffer();
   $('find-count').textContent = findQuery && b ? `${b.lines.filter(matchesFind).length} coincidencias` : '';
 }
@@ -1277,18 +1550,21 @@ async function start(): Promise<void> {
     'Tus scripts de mIRC (.mrc) se gestionan desde «Scripts».',
   ]) welcome.lines.push({ time: now, kind: 'info', text });
   local.buffers.set(STATUS, welcome);
+  ensureWin(LOCAL, welcome);
   for (const s of snap.sessions) {
     const st = ensureSession({ sid: s.sid, name: s.name, state: s.state, nick: s.nick });
     for (const b of s.buffers) {
       const buf = getBuffer(st.info.sid, b.name, b.type)!;
       buf.topic = b.topic;
       buf.nicks = b.nicks;
+      ensureWin(st.info.sid, buf);
     }
   }
-  for (const w of snap.windows) getBuffer(LOCAL, w, 'custom');
+  for (const w of snap.windows) ensureWin(LOCAL, getBuffer(LOCAL, w, 'custom')!);
   for (const d of snap.dialogs) syncDialog(d.name, d);
   for (const d of snap.dccs) dccs.set(d.id, d);
   window.onda.onUi(onUi);
+  $('btn-max').textContent = desktop.classList.contains('maxed') ? 'Restaurar' : 'Maximizar';
   activate(LOCAL, STATUS);
   renderDcc();
 }

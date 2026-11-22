@@ -14,7 +14,8 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Uso diario**: reconexión automática volviendo a los canales abiertos, detección de conexiones caídas, lista de ignorados (`/ignore`),
   avisos de amigos (`/notify`), comandos automáticos al conectar, lista de canales de la red («Canales» o `/list`) y búsqueda en la conversación (Ctrl+F).
 - **Registros** de conversación en texto plano, con buscador.
-- **Distribución clásica** (por defecto): barra de menús, barra de ventanas, texto compacto con el formato `[hora] <nick> mensaje`. La moderna sigue disponible en «Ver».
+- **Ventanas flotantes** como en mIRC, con aspecto moderno: cada canal, privado y estado es una ventana que se mueve, se redimensiona, se minimiza y se maximiza; se colocan en cascada o en mosaico. Barra de menús, barra de botones y barra de ventanas con avisos de no leídos.
+- **Texto compacto** opcional con el formato `[hora] <nick> mensaje` (Ver → «Texto compacto»).
 - **Abreviaturas de comandos**: `/j`, `/p`, `/q`, `/m`, `/w`, `/k`, `/t`, `/n`, `/c`, `/ns`, `/cs`, `/id`…
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
 
