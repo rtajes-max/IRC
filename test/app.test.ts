@@ -225,6 +225,72 @@ describe('registro de cuenta', () => {
   });
 });
 
+describe('robustez de la conexión', () => {
+  /** Servidor mínimo: registra, acepta JOIN y permite cortar o callar la conexión. */
+  async function fakeServer() {
+    const net = await import('node:net');
+    const joins: string[] = [];
+    const socks: import('node:net').Socket[] = [];
+    let silent = false;
+    const srv = net.createServer((sock) => {
+      socks.push(sock);
+      sock.setEncoding('utf8');
+      sock.on('error', () => undefined);
+      let buf = '';
+      sock.on('data', (d: string) => {
+        buf += d;
+        let i: number;
+        while ((i = buf.indexOf('\r\n')) !== -1) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          if (silent) continue;
+          if (line.startsWith('USER ')) sock.write(':srv 001 yo :Hola\r\n');
+          else if (line.startsWith('JOIN ')) {
+            joins.push(line.slice(5));
+            sock.write(`:yo!u@h JOIN ${line.slice(5)}\r\n`);
+          } else if (line.startsWith('PING ')) sock.write(`:srv PONG srv ${line.slice(5)}\r\n`);
+        }
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    return { srv, joins, socks, port: (srv.address() as import('node:net').AddressInfo).port, silence: () => (silent = true) };
+  }
+
+  it('al caerse la conexión reconecta y vuelve a los canales abiertos', async () => {
+    const f = await fakeServer();
+    const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-rec-')) });
+    const ev: UiEvent[] = [];
+    app.on('ui', (e: UiEvent) => ev.push(e));
+    const sid = app.connect({ name: 'L', host: '127.0.0.1', port: f.port, tls: false, nick: 'yo', autojoin: ['#fijo'] });
+    await waitFor(() => f.joins.includes('#fijo'), 'autojoin');
+    app.input(sid, '*', '/join #extra');
+    await waitFor(() => f.joins.includes('#extra'), 'join manual');
+    f.socks[0].destroy();
+    await waitFor(() => app.sessions.get(sid)!.state === 'disconnected', 'desconexión detectada');
+    await waitFor(() => f.joins.filter((j) => j === '#extra').length === 2 && f.joins.filter((j) => j === '#fijo').length === 2, 'reentrada tras reconectar', 12000);
+    expect(app.sessions.get(sid)!.state).toBe('connected');
+    app.shutdown();
+    f.srv.close();
+  }, 20000);
+
+  it('detecta un servidor que deja de responder', async () => {
+    const { IrcClient } = await import('../src/core/irc/client');
+    const f = await fakeServer();
+    const c = new IrcClient({ host: '127.0.0.1', port: f.port, nick: 'yo' });
+    c.deadAfter = 2;
+    let closed = '';
+    c.on('error', (e: Error) => (closed = e.message));
+    c.connect();
+    await waitFor(() => c.registered, 'registro');
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(c.connected).toBe(true); // mientras responde a los PING sigue viva
+    f.silence();
+    await waitFor(() => !c.connected, 'cierre por silencio', 6000);
+    expect(closed).toMatch(/dejado de responder/);
+    f.srv.close();
+  }, 15000);
+});
+
 describe('ventanas personalizadas', () => {
   it('/window, /aline, /echo @ventana, on INPUT y cierre', () => {
     const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-win-')) });
@@ -360,6 +426,22 @@ alias saludo { me saluda a $1 con $2- }`);
     user.dccAccept(dccOf(user)!.id);
     await waitFor(() => dccOf(user)?.status === 'done' && dccOf(bot)?.status === 'done', 'transferencia completa');
     expect(fs.readFileSync(dccOf(user)!.path!, 'utf8')).toBe(fs.readFileSync(file, 'utf8'));
+  });
+
+  it('/ignore oculta los mensajes de un usuario y /unignore los recupera', async () => {
+    const [bot, user] = apps;
+    const sidB = [...bot.sessions.keys()][0];
+    const sidU = [...user.sessions.keys()][0];
+    user.input(sidU, '#juegos', '/ignore ROBOT');
+    bot.input(sidB, '#juegos', 'esto no lo debe ver marta');
+    bot.input(sidB, '#juegos', '/msg marta ni esto en privado');
+    await new Promise((r) => setTimeout(r, 700)); // deja llegar (e ignorar) los mensajes anteriores
+    user.input(sidU, '#juegos', '/unignore robot');
+    bot.input(sidB, '#juegos', 'esto sí');
+    await waitFor(() => texts(user, '#juegos').includes('<robot> esto sí'), 'mensaje tras unignore');
+    expect(texts(user, '#juegos').some((t) => t.includes('no lo debe ver'))).toBe(false);
+    expect(texts(user, 'robot').some((t) => t.includes('ni esto'))).toBe(false);
+    expect(user.settings.ignore).toEqual([]);
   });
 
   it('salir de un canal y cerrar la sesión', async () => {

@@ -10,7 +10,7 @@ import { IrcClient, MessageEvent } from './irc/client';
 import { stripFormatting } from './irc/formatting';
 import { IrcMessage, ircLower } from './irc/message';
 import { Logger } from './logs';
-import { DialogView, MenuEntry, MslContext, MslEngine, MslHost, newContext } from './msl/engine';
+import { DialogView, MenuEntry, MslContext, MslEngine, MslHost, newContext, wildMatch } from './msl/engine';
 import {
   BufferType, DccInfo, LOCAL, Line, LineKind, NetworkConfig, NickEntry, STATUS, ScriptInfo, SessionInfo, Settings,
   Snapshot, UiEvent,
@@ -52,6 +52,7 @@ const DEFAULT_SETTINGS: Settings = {
   logging: true,
   notifications: true,
   sendTyping: true,
+  ignore: [],
 };
 
 /** Cifrado de contraseñas guardadas (en la aplicación lo aporta el almacén de claves del sistema). */
@@ -277,6 +278,12 @@ export class AppCore extends EventEmitter implements MslHost {
     this.ui({ type: 'nicks', sid: s.sid, buffer: chan, nicks: this.nickList(s, chan) });
   }
 
+  /** ¿Está ignorado este remitente? Se compara el nick y la máscara completa nick!usuario@host. */
+  private ignored(nick: string, hostmask: string): boolean {
+    const full = `${nick}!${hostmask || '*@*'}`;
+    return this.settings.ignore.some((m) => (/[!@]/.test(m) ? wildMatch(m, full) : wildMatch(m, nick)));
+  }
+
   // --------------------------------------------------------- conexiones
 
   connect(cfg: NetworkConfig): string {
@@ -315,7 +322,10 @@ export class AppCore extends EventEmitter implements MslHost {
     if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
     s.reconnectTimer = null;
     s.client.removeAllListeners();
-    s.client = this.makeClient(s.cfg);
+    // Al reconectar se vuelve a entrar en los canales que estaban abiertos.
+    const open = [...s.buffers.values()].filter((b) => b.type === 'channel').map((b) => b.name);
+    const autojoin = [...new Set([...(s.cfg.autojoin ?? []), ...open].map((c) => c.trim()).filter(Boolean))];
+    s.client = this.makeClient({ ...s.cfg, autojoin });
     s.state = 'connecting';
     this.ui({ type: 'session', ...this.sessionInfo(s) });
     this.wire(s);
@@ -411,6 +421,7 @@ export class AppCore extends EventEmitter implements MslHost {
         nick: m.from, chan: isChan ? m.target : undefined, target: isChan ? m.target : c.nick, address: m.hostmask,
         text: m.text, isMe: m.self,
       });
+      if (!m.self && this.ignored(m.from, m.hostmask)) return;
       const scripted = !m.self && !m.history;
       if (scripted && this.engine.fire(event, init, true).haltdef) return;
 
@@ -513,13 +524,16 @@ export class AppCore extends EventEmitter implements MslHost {
     c.on('names', (e: { channel: string }) => this.emitNicks(s, e.channel));
     c.on('typing', (e: { nick: string; target: string; state: string }) => this.ui({ type: 'typing', sid, buffer: e.target, nick: e.nick, state: e.state }));
     c.on('react', (e: { nick: string; target: string; emoji: string; msgid: string }) => this.ui({ type: 'react', sid, buffer: e.target, ...e }));
-    c.on('invite', (e: { nick: string; channel: string }) => this.note(sid, STATUS, `${e.nick} te invita a ${e.channel}`));
+    c.on('invite', (e: { nick: string; channel: string }) => {
+      if (!this.ignored(e.nick, '')) this.note(sid, STATUS, `${e.nick} te invita a ${e.channel}`);
+    });
     c.on('ctcpreply', (e: { from: string; command: string; args: string }) => {
       let text = e.args;
       if (e.command === 'PING' && /^\d+$/.test(e.args)) text = `${((Date.now() - Number(e.args)) / 1000).toFixed(2)} s`;
       this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'ctcp', `[${e.from} respuesta ${e.command}] ${text}`);
     });
     c.on('ctcp', (e: { from: string; target: string; command: string; args: string; hostmask: string }) => {
+      if (this.ignored(e.from, e.hostmask)) return;
       if (e.command === 'DCC') {
         this.onDccOffer(s, e.from, e.args);
         return;
@@ -788,6 +802,24 @@ export class AppCore extends EventEmitter implements MslHost {
         this.note(sid, STATUS, `Solicitando el registro de la cuenta ${s!.client.nick}…`);
         return true;
       }
+      case 'ignore':
+      case 'unignore': {
+        const where = this.active.sid === sid ? this.active.buffer : STATUS;
+        const mask = toks.filter((t) => !t.startsWith('-'))[0];
+        if (!mask) {
+          this.note(sid, where, this.settings.ignore.length ? `Ignorados: ${this.settings.ignore.join(', ')}` : 'No ignoras a nadie. Uso: /ignore nick  ·  /unignore nick');
+          return true;
+        }
+        const has = this.settings.ignore.some((m) => m.toLowerCase() === mask.toLowerCase());
+        if (name === 'ignore' && !toks.includes('-r')) {
+          if (!has) this.updateSettings({ ignore: [...this.settings.ignore, mask] });
+          this.note(sid, where, `Ignorando a ${mask}`);
+        } else {
+          this.updateSettings({ ignore: this.settings.ignore.filter((m) => m.toLowerCase() !== mask.toLowerCase()) });
+          this.note(sid, where, has ? `Ya no ignoras a ${mask}` : `${mask} no estaba ignorado`);
+        }
+        return true;
+      }
       case 'whois':
         if (!online()) return fail('No estás conectado');
         s!.client.send(`WHOIS ${toks[0] ?? s!.client.nick}`);
@@ -881,7 +913,7 @@ export class AppCore extends EventEmitter implements MslHost {
       case 'help':
         for (const l of [
           'Comandos principales: /server [-e] host[:puerto] · /join #canal · /part · /msg nick texto · /query nick · /me acción',
-          '/nick · /register contraseña · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
+          '/nick · /register contraseña · /ignore nick · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
           'Scripts mIRC: /load archivo.mrc · /unload archivo.mrc · // evalúa identificadores (p. ej. //echo -a $me)',
         ]) this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'info', l);
         return true;

@@ -33,6 +33,8 @@ export interface Settings {
   logging: boolean;
   notifications: boolean;
   sendTyping: boolean;
+  /** Nicks o máscaras (nick!usuario@host, con comodines) cuyos mensajes no se muestran. */
+  ignore: string[];
 }
 
 export type LineKind =

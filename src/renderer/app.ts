@@ -215,6 +215,8 @@ async function nickMenu(x: number, y: number, nick: string): Promise<void> {
     ['Conversación privada', () => send(`/query ${nick}`)],
     ['Información (whois)', () => send(`/whois ${nick}`)],
     ['Mencionar', () => insertText(nick + ': ')],
+    [settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'Dejar de ignorar' : 'Ignorar', () =>
+      send(`/${settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'unignore' : 'ignore'} ${nick}`)],
     null,
     ...(inChan
       ? ([

@@ -11,6 +11,7 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **IRCv3**: TLS, autenticación SASL, hora del servidor, historial (`chathistory`), aviso de «está escribiendo» y reacciones.
 - **DCC**: envío y recepción de archivos (también en modo pasivo, con `/dcc send -p`, para quien no puede recibir conexiones) y chat directo. Las ofertas entrantes nunca se aceptan solas.
 - **Contraseñas** de las redes guardadas cifradas con el almacén de claves del sistema, cuando está disponible.
+- **Uso diario**: reconexión automática volviendo a los canales abiertos, detección de conexiones caídas y lista de ignorados (`/ignore`).
 - **Registros** de conversación en texto plano, con buscador.
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
 
