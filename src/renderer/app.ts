@@ -115,7 +115,7 @@ function activate(sid: string, buffer: string, focus = true): void {
   if (findQuery) $('find-count').textContent = `${b.lines.filter(matchesFind).length} coincidencias`;
   renderTree();
   const s = sessions.get(sid);
-  document.title = `${b.type === 'status' ? s?.info.name ?? 'Onda' : b.name} · Onda IRC`;
+  renderStatus();
   if (desktop.classList.contains('maxed')) w.log.scrollTop = w.log.scrollHeight;
   if (focus && $('find').hidden) input.focus();
 }
@@ -164,7 +164,7 @@ function rememberWin(w: Win): void {
 
 function setMaxed(on: boolean): void {
   desktop.classList.toggle('maxed', on);
-  $('btn-max').textContent = on ? 'Restaurar' : 'Maximizar';
+  $('btn-max').classList.toggle('on', on);
   saveGeo();
   for (const w of wins.values()) w.log.scrollTop = w.log.scrollHeight;
 }
@@ -875,7 +875,11 @@ function updateDialogControl(node: HTMLElement, c: DialogControlView): void {
 function onUi(ev: UiEvent): void {
   switch (ev.type) {
     case 'session': {
-      ensureSession({ sid: ev.sid, name: ev.name, state: ev.state, nick: ev.nick });
+      const before = sessions.get(ev.sid)?.info;
+      ensureSession({ sid: ev.sid, name: ev.name, state: ev.state, nick: ev.nick, lag: ev.lag, away: ev.away });
+      renderStatus();
+      // Un cambio que solo afecta al lag no necesita redibujar nada más.
+      if (before && before.state === ev.state && before.nick === ev.nick && before.name === ev.name) break;
       renderTree();
       for (const w of wins.values()) if (w.sid === ev.sid) renderHeader(w);
       break;
@@ -924,7 +928,11 @@ function onUi(ev: UiEvent): void {
       if (counts && (!isActive(sid, b.name) || !document.hasFocus())) {
         if (!isActive(sid, b.name)) {
           b.unread++;
-          if (ev.line.highlight) b.highlight = true;
+          if (ev.line.highlight) {
+            b.highlight = true;
+            lastNote = { sid, buffer: b.name, text: `${ev.line.nick ?? ''} en ${b.type === 'query' ? 'privado' : b.name}: ${stripFormatting(ev.line.text).slice(0, 80)}` };
+            renderStatus();
+          }
           renderTree();
         }
         if (ev.line.highlight && settings.notifications && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -994,6 +1002,7 @@ function onUi(ev: UiEvent): void {
     case 'settings':
       settings = ev.settings;
       applySettings();
+      renderStatus();
       for (const w of wins.values()) {
         renderHeader(w);
         renderLog(w);
@@ -1056,7 +1065,7 @@ function tabComplete(): void {
     completion = { start: pos - m[1].length, matches, index: 0, base: input.value.slice(pos) };
   } else completion.index = (completion.index + 1) % completion.matches.length;
   const pick = completion.matches[completion.index];
-  const suffix = completion.start === 0 && !/^[#/]/.test(pick) ? ': ' : ' ';
+  const suffix = completion.start === 0 && !/^[#/]/.test(pick) ? (settings.nickSuffix || ':') + ' ' : ' ';
   input.value = input.value.slice(0, completion.start) + pick + suffix + completion.base;
   const caret = completion.start + pick.length + suffix.length;
   input.setSelectionRange(caret, caret);
@@ -1233,6 +1242,8 @@ $('settings-form').addEventListener('submit', async () => {
     logging: f.has('logging'),
     notifications: wantsNotif,
     sendTyping: f.has('sendTyping'),
+    floodProtect: f.has('floodProtect'),
+    nickSuffix: String(f.get('nickSuffix') ?? '').trim().slice(0, 4) || ':',
   } satisfies Partial<Settings>);
 });
 
@@ -1306,7 +1317,7 @@ $<HTMLTextAreaElement>('script-source').addEventListener('keydown', (e) => {
 });
 
 // Barra de menús y opciones de «Ver» (se recuerdan en este equipo)
-const view = { tree: true, nicks: true, switchbar: true, toolbar: true };
+const view = { tree: false, nicks: true, switchbar: true, toolbar: true, switchBottom: true, statusbar: true };
 try {
   Object.assign(view, JSON.parse(localStorage.getItem('onda.ver') ?? '{}'));
 } catch {
@@ -1317,6 +1328,8 @@ function applyView(): void {
   document.body.classList.toggle('hide-nicks', !view.nicks);
   document.body.classList.toggle('hide-switchbar', !view.switchbar);
   document.body.classList.toggle('hide-toolbar', !view.toolbar);
+  document.body.classList.toggle('switch-bottom', view.switchBottom);
+  $('statusbar').hidden = !view.statusbar;
   try {
     localStorage.setItem('onda.ver', JSON.stringify(view));
   } catch {
@@ -1346,6 +1359,8 @@ function menuItems(name: string): MenuItem[] {
       return [
         toggle('toolbar', 'Barra de botones'),
         toggle('switchbar', 'Barra de ventanas'),
+        toggle('switchBottom', 'Barra de ventanas abajo'),
+        toggle('statusbar', 'Barra de estado'),
         toggle('tree', 'Árbol de redes'),
         toggle('nicks', 'Lista de nicks'),
         null,
@@ -1369,6 +1384,7 @@ function menuItems(name: string): MenuItem[] {
           $('find-input').focus();
         }],
         null,
+        ['Panel de control…', click('btn-panel')],
         ['Ajustes…', click('btn-settings')],
       ];
     case 'canal':
@@ -1432,6 +1448,155 @@ $('btn-max').addEventListener('click', () => setMaxed(!desktop.classList.contain
 $('btn-find').addEventListener('click', () => {
   $('find').hidden = false;
   $('find-input').focus();
+});
+
+// ----------------------------------------------------- barra de estado y título
+let lastNote: { sid: string; buffer: string; text: string } | null = null;
+
+function renderStatus(): void {
+  const s = sessions.get(active.sid);
+  const b = activeBuffer();
+  const d = new Date();
+  $('sb-clock').textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const real = s && s.info.sid !== LOCAL ? s : [...sessions.values()].find((x) => x.info.sid !== LOCAL);
+  const net = $('sb-net');
+  net.className = real ? real.info.state : '';
+  net.textContent = real ? `${real.info.name} (${stateLabel(real.info.state)})` : 'Sin conexión';
+  $('sb-nick').textContent = real ? real.info.nick : settings.nick;
+  const lag = real && real.info.state === 'connected' && (real.info.lag ?? -1) >= 0 ? real.info.lag! : -1;
+  $('sb-lag').textContent = lag >= 0 ? `Lag: ${lag.toFixed(lag < 10 ? 2 : 0)} s` : '';
+  $('sb-away').hidden = !real?.info.away;
+  $('btn-away').classList.toggle('on', !!real?.info.away);
+  $('sb-log').textContent = settings.logging ? 'Registro activado' : 'Registro desactivado';
+  const note = $('sb-note');
+  if (lastNote && isActive(lastNote.sid, lastNote.buffer)) lastNote = null;
+  note.hidden = !lastNote;
+  note.textContent = lastNote ? `● ${lastNote.text}` : '';
+  const name = b ? (b.type === 'status' ? s?.info.name ?? 'Onda' : b.name) : 'Onda';
+  const parts = [name];
+  if (real) parts.push(real.info.state === 'connected' ? `${real.info.name}${lag >= 0 ? ` · lag ${lag.toFixed(1)} s` : ''}` : stateLabel(real.info.state));
+  if (real?.info.away) parts.push('ausente');
+  document.title = `${parts.join(' · ')} — Onda IRC`;
+}
+$('sb-note').addEventListener('click', () => {
+  if (lastNote) activate(lastNote.sid, lastNote.buffer);
+});
+window.setInterval(renderStatus, 20000);
+
+// ----------------------------------------------------- botones nuevos y teclas de función
+$('btn-disconnect').addEventListener('click', () => send('/disconnect'));
+$('btn-join').addEventListener('click', () => insertText('/join #'));
+$('btn-query').addEventListener('click', () => insertText('/query '));
+$('btn-away').addEventListener('click', () => send('/away'));
+document.addEventListener('keydown', (e) => {
+  if (!/^F([1-9]|1[0-2])$/.test(e.key) || e.ctrlKey || e.altKey || e.metaKey) return;
+  const cmd = settings.fkeys?.[e.shiftKey ? 'S' + e.key : e.key];
+  if (!cmd) return;
+  e.preventDefault();
+  send(cmd);
+});
+
+// ----------------------------------------------------- panel de control
+const PANEL: [string, string, () => void][] = [
+  ['Ajustes generales', '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>', () => $('btn-settings').click()],
+  ['Redes y conexión', '<path d="M9 7V3M15 7V3M7 7h10v5a5 5 0 0 1-10 0zM12 17v4"/>', () => $('btn-connect').click()],
+  ['Sistema de ausencia', '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>', () => openAway()],
+  ['Teclas de función', '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>', () => openFkeys()],
+  ['Ignorados', '<circle cx="12" cy="12" r="8"/><path d="M6.5 6.5l11 11"/>', () => openIgnore()],
+  ['Scripts', '<path d="M8 6l-5 6 5 6M16 6l5 6-5 6M13 4l-2 16"/>', () => $('btn-scripts').click()],
+  ['Lista de canales', '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>', () => $('btn-list').click()],
+  ['Transferencias DCC', '<path d="M7 4v14M3 14l4 4 4-4M17 20V6M13 10l4-4 4 4"/>', () => $('btn-dcc').click()],
+  ['Registros', '<path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11"/>', () => $('btn-logs').click()],
+];
+function svgIcon(paths: string): SVGSVGElement {
+  // Los trazos son constantes definidas arriba, nunca texto del usuario.
+  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`, 'image/svg+xml');
+  return document.importNode(doc.documentElement, true) as unknown as SVGSVGElement;
+}
+$('btn-panel').addEventListener('click', () => {
+  const grid = $('panel-grid');
+  grid.replaceChildren();
+  for (const [label, icon, open] of PANEL) {
+    const b = el('button');
+    b.type = 'button';
+    b.append(svgIcon(icon), el('span', '', label));
+    b.addEventListener('click', () => {
+      dialog('dlg-panel').close();
+      open();
+    });
+    grid.append(b);
+  }
+  dialog('dlg-panel').showModal();
+});
+
+function openAway(): void {
+  const f = $<HTMLFormElement>('away-form');
+  (f.elements.namedItem('awayMessage') as HTMLInputElement).value = settings.awayMessage;
+  (f.elements.namedItem('awayAutoReply') as HTMLInputElement).checked = settings.awayAutoReply;
+  (f.elements.namedItem('awayNickSuffix') as HTMLInputElement).value = settings.awayNickSuffix;
+  dialog('dlg-away').showModal();
+}
+$('away-form').addEventListener('submit', () => {
+  const f = new FormData($<HTMLFormElement>('away-form'));
+  void window.onda.invoke('settings:update', {
+    awayMessage: String(f.get('awayMessage') ?? '').trim() || 'Ausente',
+    awayAutoReply: f.has('awayAutoReply'),
+    awayNickSuffix: String(f.get('awayNickSuffix') ?? '').replace(/\s/g, '').slice(0, 12),
+  } satisfies Partial<Settings>);
+});
+
+function openFkeys(): void {
+  const grid = $('fkeys-grid');
+  grid.replaceChildren();
+  for (let n = 1; n <= 12; n++) {
+    const label = el('label', '', `F${n}`);
+    const box = el('input');
+    box.name = `F${n}`;
+    box.value = settings.fkeys?.[`F${n}`] ?? '';
+    box.placeholder = n === 1 ? '/help' : '';
+    label.append(box);
+    grid.append(label);
+  }
+  dialog('dlg-fkeys').showModal();
+}
+$('fkeys-form').addEventListener('submit', () => {
+  const f = new FormData($<HTMLFormElement>('fkeys-form'));
+  const fkeys: Record<string, string> = {};
+  for (let n = 1; n <= 12; n++) {
+    const v = String(f.get(`F${n}`) ?? '').trim();
+    if (v) fkeys[`F${n}`] = v;
+  }
+  void window.onda.invoke('settings:update', { fkeys } satisfies Partial<Settings>);
+});
+
+function renderIgnore(): void {
+  const list = $('ignore-list');
+  list.replaceChildren();
+  if (!settings.ignore.length) list.append(el('div', 'empty', 'No ignoras a nadie.'));
+  for (const m of settings.ignore) {
+    const row = el('div', 'ign');
+    const rm = el('button', '', 'Quitar');
+    rm.type = 'button';
+    rm.addEventListener('click', async () => {
+      await window.onda.invoke('settings:update', { ignore: settings.ignore.filter((x) => x !== m) } satisfies Partial<Settings>);
+      renderIgnore();
+    });
+    row.append(el('span', '', m), rm);
+    list.append(row);
+  }
+}
+function openIgnore(): void {
+  renderIgnore();
+  dialog('dlg-ignore').showModal();
+}
+$('ignore-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const box = $<HTMLInputElement>('ignore-input');
+  const mask = box.value.trim().split(/\s+/)[0];
+  if (!mask) return;
+  if (!settings.ignore.includes(mask)) await window.onda.invoke('settings:update', { ignore: [...settings.ignore, mask] } satisfies Partial<Settings>);
+  box.value = '';
+  renderIgnore();
 });
 
 // Búsqueda en la conversación (Ctrl+F)
@@ -1564,9 +1729,10 @@ async function start(): Promise<void> {
   for (const d of snap.dialogs) syncDialog(d.name, d);
   for (const d of snap.dccs) dccs.set(d.id, d);
   window.onda.onUi(onUi);
-  $('btn-max').textContent = desktop.classList.contains('maxed') ? 'Restaurar' : 'Maximizar';
+  $('btn-max').classList.toggle('on', desktop.classList.contains('maxed'));
   activate(LOCAL, STATUS);
   renderDcc();
+  renderStatus();
 }
 
 void start();

@@ -33,6 +33,9 @@ function createWindow(): void {
   win.on('closed', () => (win = null));
 }
 
+// En pruebas, todo el estado (incluidas las preferencias de la ventana) va a la carpeta indicada.
+if (process.env.ONDA_DATA_DIR) app.setPath('userData', process.env.ONDA_DATA_DIR);
+
 app.whenReady().then(() => {
   const dataDir = process.env.ONDA_DATA_DIR || app.getPath('userData');
   core = new AppCore({

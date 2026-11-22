@@ -483,3 +483,31 @@ input:not([type='checkbox']), select, textarea {
   .win .nicks { display: none; }
   .win .my-nick { display: none; }
 }
+
+/* ------------------------------------------------------------------ barra de iconos, barra de estado, panel */
+body { display: flex; flex-direction: column; }
+#menubar { order: 0; } #toolbar { order: 1; } #switchbar { order: 2; } #layout { order: 3; } #statusbar { order: 6; }
+body.switch-bottom #switchbar { order: 5; border-bottom: 0; border-top: 1px solid var(--border); }
+#toolbar { padding: 3px 6px; gap: 2px; }
+#toolbar .tb { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; padding: 0; border: 1px solid transparent; background: none; border-radius: 6px; color: var(--text); }
+#toolbar .tb:hover { background: var(--panel-2); border-color: var(--border); }
+#toolbar .tb svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#toolbar .tb.on { color: var(--accent); background: var(--panel-2); border-color: var(--accent); }
+#toolbar .tb .badge { position: absolute; top: -3px; right: -4px; min-width: 15px; font-size: 10px; padding: 0 3px; }
+#statusbar { display: flex; align-items: center; gap: 14px; padding: 2px 10px; background: var(--panel); border-top: 1px solid var(--border); font-size: 0.86em; color: var(--muted); white-space: nowrap; overflow: hidden; }
+#sb-clock { font-variant-numeric: tabular-nums; color: var(--text); }
+#sb-net::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--muted); }
+#sb-net.connected::before { background: var(--join); }
+#sb-net.connecting::before { background: #e0b341; }
+#sb-net.disconnected::before { background: var(--error); }
+#sb-away { color: #e0b341; font-weight: 600; }
+#sb-note { border: 0; background: none; padding: 0; color: var(--error); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+#panel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 10px; }
+#panel-grid button { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 8px 12px; border-radius: 10px; text-align: center; background: var(--bg); }
+#panel-grid button svg { width: 30px; height: 30px; fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+#panel-grid button span { font-size: 0.92em; }
+#ignore-form { display: flex; gap: 8px; margin-bottom: 10px; }
+#ignore-form input { flex: 1; }
+#ignore-list { max-height: 45vh; overflow-y: auto; }
+.ign { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.ign span { flex: 1; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }

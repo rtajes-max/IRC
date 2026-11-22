@@ -437,6 +437,66 @@ describe('abreviaturas de comandos', () => {
   }, 20000);
 });
 
+describe('ausencia, lag y protección contra inundaciones', () => {
+  it('avisa una sola vez a quien escribe, guarda lo recibido y lo muestra al volver', async () => {
+    const net = await import('node:net');
+    const got: string[] = [];
+    let sock: import('node:net').Socket | undefined;
+    const srv = net.createServer((s) => {
+      sock = s;
+      s.setEncoding('utf8');
+      s.on('error', () => undefined);
+      let buf = '';
+      s.on('data', (d: string) => {
+        buf += d;
+        let i: number;
+        while ((i = buf.indexOf('\r\n')) !== -1) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          got.push(line);
+          if (line.startsWith('USER ')) s.write(':srv 001 yo :Hola\r\n:yo!u@h JOIN #sala\r\n');
+          else if (line.startsWith('PING :lag')) s.write(`:srv PONG srv :${line.slice(6)}\r\n`);
+          else if (line.startsWith('NICK yo|aus')) s.write(':yo!u@h NICK yo|aus\r\n');
+          else if (line === 'NICK yo') s.write(':yo|aus!u@h NICK yo\r\n');
+        }
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as import('node:net').AddressInfo).port;
+    const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-away-')) });
+    const ev: UiEvent[] = [];
+    app.on('ui', (e: UiEvent) => ev.push(e));
+    app.updateSettings({ awayNickSuffix: '|aus', awayMessage: 'comiendo' });
+    const sid = app.connect({ name: 'L', host: '127.0.0.1', port, tls: false, nick: 'yo' });
+    await waitFor(() => ev.some((e) => e.type === 'session' && (e.lag ?? -1) >= 0), 'lag medido');
+    app.input(sid, '#sala', '/away');
+    await waitFor(() => app.sessions.get(sid)!.client.nick === 'yo|aus', 'nick de ausencia');
+    expect(got).toContain('AWAY :comiendo');
+    expect(ev.some((e) => e.type === 'session' && e.away === true)).toBe(true);
+    sock!.write(':ana!a@h PRIVMSG yo|aus :estás?\r\n:ana!a@h PRIVMSG yo|aus :hola??\r\n:luis!l@h PRIVMSG #sala :yo|aus: mira esto\r\n:eva!e@h PRIVMSG #sala :nada que ver\r\n');
+    await waitFor(() => got.filter((l) => l.startsWith('NOTICE ')).length === 2, 'respuestas automáticas');
+    expect(got.filter((l) => l.startsWith('NOTICE '))).toEqual(['NOTICE ana :Estoy ausente: comiendo', 'NOTICE luis :Estoy ausente: comiendo']);
+    app.input(sid, '#sala', '/away');
+    await waitFor(() => app.sessions.get(sid)!.client.nick === 'yo', 'nick recuperado');
+    const lines = ev.flatMap((e) => (e.type === 'line' && e.buffer === '#sala' ? [e.line.text] : []));
+    expect(lines.some((l) => /Has vuelto tras \d+ min\. Mientras tanto te escribieron 3 veces/.test(l))).toBe(true);
+    expect(lines.filter((l) => /^\[\d\d:\d\d\] </.test(l)).map((l) => l.slice(8))).toEqual(['<ana> estás?', '<ana> hola??', '<luis en #sala> yo|aus: mira esto']);
+    expect(got.filter((l) => l === 'AWAY')).toHaveLength(1);
+
+    // Inundación: cinco peticiones CTCP seguidas → se ignora al emisor, también sus privados.
+    for (let i = 0; i < 6; i++) sock!.write(':pesado!p@h PRIVMSG yo :\x01VERSION\x01\r\n');
+    sock!.write(':pesado!p@h PRIVMSG yo :y ahora un privado\r\n:ana!a@h PRIVMSG yo :sigo aquí\r\n');
+    await waitFor(() => ev.some((e) => e.type === 'line' && e.line.text === 'sigo aquí'), 'mensaje de ana');
+    await waitFor(() => got.filter((l) => l.startsWith('NOTICE pesado :\x01VERSION')).length === 3, 'respuestas CTCP limitadas', 8000);
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(got.filter((l) => l.startsWith('NOTICE pesado :\x01VERSION')).length).toBe(3);
+    expect(ev.some((e) => e.type === 'line' && e.line.text.includes('Protección: pesado'))).toBe(true);
+    expect(ev.some((e) => e.type === 'line' && e.line.text === 'y ahora un privado')).toBe(false);
+    app.shutdown();
+    srv.close();
+  }, 20000);
+});
+
 describe('ventanas personalizadas', () => {
   it('/window, /aline, /echo @ventana, on INPUT y cierre', () => {
     const app = new AppCore({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onda-win-')) });

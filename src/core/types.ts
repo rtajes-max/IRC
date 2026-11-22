@@ -41,6 +41,16 @@ export interface Settings {
   ignore: string[];
   /** Nicks de los que se avisa cuando entran o salen de la red. */
   notify: string[];
+  /** Sistema de ausencia: mensaje por defecto, respuesta automática y sufijo opcional para el nick. */
+  awayMessage: string;
+  awayAutoReply: boolean;
+  awayNickSuffix: string;
+  /** Protección personal: ignora un rato a quien inunda con privados o peticiones CTCP. */
+  floodProtect: boolean;
+  /** Lo que se añade al completar un nick al principio de la línea. */
+  nickSuffix: string;
+  /** Comandos asignados a las teclas de función (F1…F12). */
+  fkeys: Record<string, string>;
 }
 
 export type LineKind =
@@ -71,6 +81,9 @@ export interface SessionInfo {
   name: string;
   state: 'connecting' | 'connected' | 'disconnected' | 'local';
   nick: string;
+  /** Retardo con el servidor en segundos (-1 si no se conoce). */
+  lag?: number;
+  away?: boolean;
 }
 
 export interface DccInfo {
