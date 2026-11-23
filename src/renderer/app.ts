@@ -1317,7 +1317,10 @@ $<HTMLTextAreaElement>('script-source').addEventListener('keydown', (e) => {
 });
 
 // Barra de menús y opciones de «Ver» (se recuerdan en este equipo)
-const view = { tree: false, nicks: true, switchbar: true, toolbar: true, switchBottom: true, statusbar: true };
+type Edge = 'top' | 'bottom' | 'left' | 'right';
+const view: { tree: boolean; nicks: boolean; switchbar: boolean; toolbar: boolean; statusbar: boolean; switchPos: Edge; statusPos: 'top' | 'bottom' } = {
+  tree: false, nicks: true, switchbar: true, toolbar: true, statusbar: true, switchPos: 'bottom', statusPos: 'bottom',
+};
 try {
   Object.assign(view, JSON.parse(localStorage.getItem('onda.ver') ?? '{}'));
 } catch {
@@ -1328,7 +1331,17 @@ function applyView(): void {
   document.body.classList.toggle('hide-nicks', !view.nicks);
   document.body.classList.toggle('hide-switchbar', !view.switchbar);
   document.body.classList.toggle('hide-toolbar', !view.toolbar);
-  document.body.classList.toggle('switch-bottom', view.switchBottom);
+  // Barra de ventanas: arriba o abajo va en la columna principal; a izquierda o derecha, junto al escritorio.
+  if (!['top', 'bottom', 'left', 'right'].includes(view.switchPos)) view.switchPos = 'bottom';
+  const bar = $('switchbar');
+  const vertical = view.switchPos === 'left' || view.switchPos === 'right';
+  bar.classList.toggle('vertical', vertical);
+  bar.setAttribute('aria-orientation', vertical ? 'vertical' : 'horizontal');
+  if (view.switchPos === 'left') $('chat').before(bar);
+  else if (view.switchPos === 'right') $('chat').after(bar);
+  else $('layout').before(bar);
+  document.body.classList.toggle('switch-bottom', view.switchPos === 'bottom');
+  document.body.classList.toggle('status-top', view.statusPos === 'top');
   $('statusbar').hidden = !view.statusbar;
   try {
     localStorage.setItem('onda.ver', JSON.stringify(view));
@@ -1340,7 +1353,7 @@ applyView();
 
 function menuItems(name: string): MenuItem[] {
   const tick = (on: boolean, label: string) => (on ? '✓ ' : '\u2003 ') + label;
-  const toggle = (k: keyof typeof view, label: string): MenuItem => [tick(view[k], label), () => {
+  const toggle = (k: 'tree' | 'nicks' | 'switchbar' | 'toolbar' | 'statusbar', label: string): MenuItem => [tick(view[k], label), () => {
     view[k] = !view[k];
     applyView();
   }];
@@ -1359,10 +1372,28 @@ function menuItems(name: string): MenuItem[] {
       return [
         toggle('toolbar', 'Barra de botones'),
         toggle('switchbar', 'Barra de ventanas'),
-        toggle('switchBottom', 'Barra de ventanas abajo'),
         toggle('statusbar', 'Barra de estado'),
         toggle('tree', 'Árbol de redes'),
         toggle('nicks', 'Lista de nicks'),
+        null,
+        ['Barra de ventanas en…', null],
+        ...(['top', 'bottom', 'left', 'right'] as const).map((pos): MenuItem => [
+          tick(view.switchPos === pos, '\u2003' + { top: 'Arriba', bottom: 'Abajo', left: 'Izquierda', right: 'Derecha' }[pos]),
+          () => {
+            view.switchPos = pos;
+            view.switchbar = true;
+            applyView();
+          },
+        ]),
+        ['Barra de estado en…', null],
+        ...(['top', 'bottom'] as const).map((pos): MenuItem => [
+          tick(view.statusPos === pos, '\u2003' + { top: 'Arriba', bottom: 'Abajo' }[pos]),
+          () => {
+            view.statusPos = pos;
+            view.statusbar = true;
+            applyView();
+          },
+        ]),
         null,
         [tick(settings.showTimestamps, 'Mostrar la hora'), () => window.onda.invoke('settings:update', { showTimestamps: !settings.showTimestamps })],
         null,
@@ -1448,6 +1479,38 @@ $('btn-max').addEventListener('click', () => setMaxed(!desktop.classList.contain
 $('btn-find').addEventListener('click', () => {
   $('find').hidden = false;
   $('find-input').focus();
+});
+
+$('switchbar').addEventListener('contextmenu', (e) => {
+  if ((e.target as HTMLElement).closest('.sw')) return;
+  e.preventDefault();
+  showMenu(e.clientX, e.clientY, [
+    ['Colocar la barra de ventanas', null],
+    ...(['top', 'bottom', 'left', 'right'] as const).map((pos): MenuItem => [
+      (view.switchPos === pos ? '✓ ' : '\u2003 ') + { top: 'Arriba', bottom: 'Abajo', left: 'Izquierda', right: 'Derecha' }[pos],
+      () => {
+        view.switchPos = pos;
+        applyView();
+      },
+    ]),
+  ]);
+});
+$('statusbar').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  showMenu(e.clientX, e.clientY, [
+    ['Colocar la barra de estado', null],
+    ...(['top', 'bottom'] as const).map((pos): MenuItem => [
+      (view.statusPos === pos ? '✓ ' : '\u2003 ') + { top: 'Arriba', bottom: 'Abajo' }[pos],
+      () => {
+        view.statusPos = pos;
+        applyView();
+      },
+    ]),
+    ['Ocultar', () => {
+      view.statusbar = false;
+      applyView();
+    }],
+  ]);
 });
 
 // ----------------------------------------------------- barra de estado y título

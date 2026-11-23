@@ -486,8 +486,13 @@ input:not([type='checkbox']), select, textarea {
 
 /* ------------------------------------------------------------------ barra de iconos, barra de estado, panel */
 body { display: flex; flex-direction: column; }
-#menubar { order: 0; } #toolbar { order: 1; } #switchbar { order: 2; } #layout { order: 3; } #statusbar { order: 6; }
-body.switch-bottom #switchbar { order: 5; border-bottom: 0; border-top: 1px solid var(--border); }
+#menubar { order: 0; } #toolbar { order: 10; } #switchbar { order: 20; } #layout { order: 30; } #statusbar { order: 60; }
+body.switch-bottom #switchbar { order: 50; border-bottom: 0; border-top: 1px solid var(--border); }
+body.status-top #statusbar { order: 15; border-top: 0; border-bottom: 1px solid var(--border); }
+/* Barra de ventanas en vertical (a la izquierda o a la derecha del escritorio) */
+#switchbar.vertical { order: 0; flex: none; flex-direction: column; flex-wrap: nowrap; align-items: stretch; width: 150px; overflow-y: auto; border-bottom: 0; border-top: 0; border-right: 1px solid var(--border); }
+#chat + #switchbar.vertical { border-right: 0; border-left: 1px solid var(--border); }
+#switchbar.vertical .sw { max-width: none; flex: none; text-align: left; }
 #toolbar { padding: 3px 6px; gap: 2px; }
 #toolbar .tb { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; padding: 0; border: 1px solid transparent; background: none; border-radius: 6px; color: var(--text); }
 #toolbar .tb:hover { background: var(--panel-2); border-color: var(--border); }
