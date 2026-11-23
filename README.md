@@ -14,7 +14,29 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Uso diario**: reconexión automática volviendo a los canales abiertos, detección de conexiones caídas, lista de ignorados (`/ignore`),
   avisos de amigos (`/notify`), comandos automáticos al conectar, lista de canales de la red («Canales» o `/list`) y búsqueda en la conversación (Ctrl+F).
 - **Registros** de conversación en texto plano, con buscador.
+- **Ventanas flotantes** como en mIRC, con aspecto moderno: cada canal, privado y estado es una ventana que se mueve, se redimensiona, se minimiza y se maximiza; se colocan en cascada o en mosaico. Barra de menús, barra de botones y barra de ventanas con avisos de no leídos.
+- **Barras colocables**: la barra de ventanas va arriba, abajo, a la izquierda o a la derecha, y la de estado arriba o abajo (menú Ver, o clic derecho sobre la barra).
+- **Barra de iconos y barra de estado**: accesos rápidos compactos arriba; abajo, reloj, red, nick, lag, estado de ausencia y el último aviso pendiente. El título de la ventana muestra también el lag.
+- **Panel de control** con todo lo configurable: ajustes, redes, sistema de ausencia, teclas de función, ignorados, scripts, canales, transferencias y registros.
+- **Sistema de ausencia**: `/away` (o el icono de la luna) te marca ausente, avisa a quien te escriba y al volver te enseña lo que te dijeron. Puede añadir un sufijo al nick.
+- **Teclas de función** F1–F12 con el comando que elijas, y **protección contra inundaciones** de privados y CTCP.
+- **Texto compacto** opcional con el formato `[hora] <nick> mensaje` (Ver → «Texto compacto»).
+- **Abreviaturas de comandos**: `/j`, `/p`, `/q`, `/m`, `/w`, `/k`, `/t`, `/n`, `/c`, `/ns`, `/cs`, `/id`…
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
+
+## Descargas
+
+Las versiones publicadas están en <https://github.com/rtajes-max/IRC/releases>. Cada una incluye:
+
+| Sistema | Archivo |
+|---|---|
+| Windows (instalador) | `Onda-IRC-Setup-<versión>.exe` |
+| Windows (portátil, sin instalar) | `Onda-IRC-<versión>-win.zip` |
+| macOS | `Onda-IRC-<versión>-mac.dmg` |
+| Linux | `Onda-IRC-<versión>-linux.AppImage` |
+
+No están firmadas, así que Windows y macOS mostrarán un aviso al abrirlas (ver «Code signing policy»).
+Para publicar una versión nueva: Actions → «Instaladores» → «Run workflow» con la casilla «Publicar» marcada.
 
 ## Uso
 
@@ -42,7 +64,7 @@ Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -
 - Servidor Ergo; único puerto público: 6697 con TLS.
 - Cuentas: `/register contraseña` registra tu nick y guarda la cuenta en la red para identificarte sola al entrar (SASL).
   Un nick registrado exige autenticarse.
-- Los mensajes que llegan por el puente de Telegram usan nicks `Nombre/tg`; el cliente los muestra como «Nombre» con la etiqueta «Telegram».
+- Los mensajes que llegan por los puentes de mensajería usan nicks `Nombre/etiqueta` (`/tg` Telegram, `/wa` WhatsApp, `/sg` Signal, `/rcs` RCS, `/im` iMessage). El cliente los muestra como «Nombre» con la etiqueta de su red, los añade a la lista de nicks del canal en un apartado «Por puentes» y permite mencionarlos y completarlos con Tab.
 - El servidor oculta tu IP, pero un DCC es una conexión directa y la revela a la otra persona.
 
 ## Ejemplo de script

@@ -31,6 +31,11 @@ interface Session {
   reconnectTimer: NodeJS.Timeout | null;
   pendingRegistration?: { password: string; at: number };
   chanlist?: ChannelListEntry[];
+  /** Estado de ausencia: mensaje, lo recibido mientras tanto y a quién se ha respondido ya. */
+  away?: { message: string; since: number; log: string[]; replied: Map<string, number>; prevNick?: string };
+  /** Protección contra inundaciones: marcas de tiempo recientes por nick e ignorados temporales. */
+  flood: Map<string, number[]>;
+  tempIgnore: Map<string, number>;
 }
 
 interface DccEntry {
@@ -48,7 +53,8 @@ const DEFAULT_SETTINGS: Settings = {
   username: 'onda',
   realname: 'Usuario de Onda IRC',
   quitMessage: 'Onda IRC',
-  theme: 'dark',
+  theme: 'light',
+  layout: 'modern',
   fontSize: 14,
   showTimestamps: true,
   logging: true,
@@ -56,6 +62,19 @@ const DEFAULT_SETTINGS: Settings = {
   sendTyping: true,
   ignore: [],
   notify: [],
+  awayMessage: 'Ahora no estoy',
+  awayAutoReply: true,
+  awayNickSuffix: '',
+  floodProtect: true,
+  nickSuffix: ': ',
+  fkeys: {},
+};
+
+/** Abreviaturas de comandos: `/q nick` equivale a `/query nick`, `/ns texto` a `/msg NickServ texto`, etc. */
+export const COMMAND_SHORTCUTS: Record<string, string> = {
+  q: 'query', p: 'part', w: 'whois', wi: 'whois', k: 'kick', n: 'names', c: 'clear', s: 'server', m: 'msg', t: 'topic',
+  a: 'away', i: 'ignore', dop: 'deop', v: 'voice', dv: 'devoice', b: 'ban', l: 'list', id: 'msg NickServ identify',
+  ns: 'msg NickServ', cs: 'msg ChanServ', send: 'dcc send', chat: 'dcc chat', exit: 'quit', bye: 'quit',
 };
 
 /** Cifrado de contraseñas guardadas (en la aplicación lo aporta el almacén de claves del sistema). */
@@ -229,7 +248,7 @@ export class AppCore extends EventEmitter implements MslHost {
   }
 
   private sessionInfo(s: Session): SessionInfo {
-    return { sid: s.sid, name: s.cfg.name || s.cfg.host, state: s.state, nick: s.client.nick };
+    return { sid: s.sid, name: s.cfg.name || s.cfg.host, state: s.state, nick: s.client.nick, lag: s.client.lag, away: !!s.away };
   }
 
   setActive(sid: string, buffer: string): void {
@@ -299,12 +318,59 @@ export class AppCore extends EventEmitter implements MslHost {
     return this.settings.ignore.some((m) => (/[!@]/.test(m) ? wildMatch(m, full) : wildMatch(m, nick)));
   }
 
+  /**
+   * Protección personal: cuenta lo que envía un nick y, si supera el límite en la ventana de tiempo,
+   * lo ignora durante dos minutos. Devuelve true si el mensaje debe descartarse.
+   */
+  private flooding(s: Session, nick: string, kind: 'ctcp' | 'msg'): boolean {
+    const k = ircLower(nick);
+    const now = Date.now();
+    if ((s.tempIgnore.get(k) ?? 0) > now) return true;
+    if (!this.settings.floodProtect) return false;
+    const [limit, windowMs] = kind === 'ctcp' ? [4, 10000] : [8, 6000];
+    const key = `${kind}:${k}`;
+    const times = (s.flood.get(key) ?? []).filter((t) => now - t < windowMs);
+    times.push(now);
+    s.flood.set(key, times);
+    if (s.flood.size > 500) s.flood.clear();
+    if (times.length < limit) return false;
+    s.tempIgnore.set(k, now + 120000);
+    s.flood.delete(key);
+    this.line(s.sid, STATUS, 'error', `Protección: ${nick} está inundando con ${kind === 'ctcp' ? 'peticiones CTCP' : 'mensajes privados'}; se le ignora durante 2 minutos.`);
+    return true;
+  }
+
+  private setAway(s: Session, message: string): void {
+    const c = s.client;
+    const prevNick = this.settings.awayNickSuffix && !c.nick.endsWith(this.settings.awayNickSuffix) ? c.nick : undefined;
+    s.away = { message, since: Date.now(), log: [], replied: new Map(), prevNick };
+    c.send(`AWAY :${message}`);
+    if (prevNick) c.setNick(prevNick + this.settings.awayNickSuffix);
+    this.note(s.sid, this.active.sid === s.sid ? this.active.buffer : STATUS, `Ahora estás ausente: ${message}`);
+    this.ui({ type: 'session', ...this.sessionInfo(s) });
+  }
+
+  private setBack(s: Session): void {
+    const away = s.away;
+    s.away = undefined;
+    s.client.send('AWAY');
+    if (away?.prevNick) s.client.setNick(away.prevNick);
+    const where = this.active.sid === s.sid ? this.active.buffer : STATUS;
+    if (away) {
+      const mins = Math.max(1, Math.round((Date.now() - away.since) / 60000));
+      this.note(s.sid, where, `Has vuelto tras ${mins} min. ${away.log.length ? `Mientras tanto te escribieron ${away.log.length === 1 ? 'una vez' : `${away.log.length} veces`}:` : 'Nadie te escribió mientras tanto.'}`);
+      for (const l of away.log) this.line(s.sid, where, 'info', l);
+    }
+    this.ui({ type: 'session', ...this.sessionInfo(s) });
+  }
+
   // --------------------------------------------------------- conexiones
 
   connect(cfg: NetworkConfig): string {
     const sid = 's' + this.nextSid++;
     const s: Session = {
       sid, cfg, client: this.makeClient(cfg), buffers: new Map(), state: 'connecting', reconnects: 0, reconnectTimer: null,
+      flood: new Map(), tempIgnore: new Map(),
     };
     this.sessions.set(sid, s);
     this.ui({ type: 'session', ...this.sessionInfo(s) });
@@ -394,6 +460,7 @@ export class AppCore extends EventEmitter implements MslHost {
         this.note(sid, STATUS, 'Cuenta registrada. Se ha guardado en esta red para identificarte automáticamente.');
       } else this.note(sid, STATUS, 'Cuenta registrada. Guarda esta red desde «Conectar» para identificarte automáticamente.');
     });
+    c.on('lag', () => this.ui({ type: 'session', ...this.sessionInfo(s) }));
     c.on('registered', () => {
       s.state = 'connected';
       s.reconnects = 0;
@@ -468,6 +535,8 @@ export class AppCore extends EventEmitter implements MslHost {
         text: m.text, isMe: m.self,
       });
       if (!m.self && this.ignored(m.from, m.hostmask)) return;
+      if (!m.self && !m.history && !isChan && m.kind !== 'notice' && this.flooding(s, m.from, 'msg')) return;
+      if (!m.self && (s.tempIgnore.get(ircLower(m.from)) ?? 0) > Date.now()) return;
       const scripted = !m.self && !m.history;
       if (scripted && this.engine.fire(event, init, true).haltdef) return;
 
@@ -483,6 +552,17 @@ export class AppCore extends EventEmitter implements MslHost {
         nick: m.from, prefix, self: m.self, highlight, history: m.history, time: m.time.getTime(), msgid: m.tags.msgid,
       });
       this.ui({ type: 'typing', sid, buffer, nick: m.from, state: 'done' });
+      // Sistema de ausencia: se anota quién escribió y, si procede, se le avisa una vez cada diez minutos.
+      if (s.away && highlight) {
+        const t = new Date(m.time);
+        const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+        if (s.away.log.length < 200) s.away.log.push(`[${hhmm}] <${m.from}${isChan ? ` en ${m.target}` : ''}> ${stripFormatting(m.text)}`);
+        const last = s.away.replied.get(ircLower(m.from)) ?? 0;
+        if (this.settings.awayAutoReply && Date.now() - last > 600000) {
+          s.away.replied.set(ircLower(m.from), Date.now());
+          c.send(`NOTICE ${m.from} :Estoy ausente: ${s.away.message}`);
+        }
+      }
       if (scripted) this.engine.fire(event, init);
     });
 
@@ -579,7 +659,7 @@ export class AppCore extends EventEmitter implements MslHost {
       this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'ctcp', `[${e.from} respuesta ${e.command}] ${text}`);
     });
     c.on('ctcp', (e: { from: string; target: string; command: string; args: string; hostmask: string }) => {
-      if (this.ignored(e.from, e.hostmask)) return;
+      if (this.ignored(e.from, e.hostmask) || this.flooding(s, e.from, 'ctcp')) return;
       if (e.command === 'DCC') {
         this.onDccOffer(s, e.from, e.args);
         return;
@@ -712,7 +792,11 @@ export class AppCore extends EventEmitter implements MslHost {
     else this.error(s?.sid ?? LOCAL, STATUS, `Comando desconocido o sin conexión: ${line.split(' ')[0]}`);
   }
 
-  command(name: string, args: string, ctx: MslContext): boolean {
+  command(nameIn: string, argsIn: string, ctx: MslContext): boolean {
+    // Abreviaturas de los comandos más usados (los alias de los scripts tienen prioridad sobre ellas).
+    const short = COMMAND_SHORTCUTS[nameIn];
+    const name = short ? short.split(' ')[0] : nameIn;
+    const args = short && short.includes(' ') ? `${short.slice(short.indexOf(' ') + 1)} ${argsIn}`.trim() : argsIn;
     const s = this.sessionOf(ctx);
     const sid = s?.sid ?? LOCAL;
     const here = ctx.target ?? (this.active.sid === sid ? this.active.buffer : STATUS);
@@ -893,12 +977,18 @@ export class AppCore extends EventEmitter implements MslHost {
         if (!online()) return fail('No estás conectado');
         s!.client.send(`WHOIS ${toks[0] ?? s!.client.nick}`);
         return true;
+      case 'names':
+        if (!online()) return fail('No estás conectado');
+        s!.client.send(`NAMES ${toks[0] ?? chan}`.trim());
+        return true;
       case 'away':
         if (!online()) return fail('No estás conectado');
-        s!.client.send(args ? `AWAY :${args}` : 'AWAY');
+        // /away sin texto alterna: te marca ausente con el mensaje por defecto, o te trae de vuelta.
+        if (!args && s!.away) this.setBack(s!);
+        else this.setAway(s!, args || this.settings.awayMessage || 'Ausente');
         return true;
       case 'back':
-        online()?.client.send('AWAY');
+        if (online()) this.setBack(s!);
         return true;
       case 'ctcp':
         if (!online()) return fail('No estás conectado');
@@ -982,6 +1072,7 @@ export class AppCore extends EventEmitter implements MslHost {
       case 'help':
         for (const l of [
           'Comandos principales: /server [-e] host[:puerto] · /join #canal · /part · /msg nick texto · /query nick · /me acción',
+          'Abreviaturas: /j join · /p part · /q query · /m msg · /w whois · /k kick · /t topic · /n names · /c clear · /s server · /a away · /l list · /ns y /cs (NickServ, ChanServ) · /id contraseña',
           '/nick · /register contraseña · /ignore nick · /notify nick · /list · /topic · /kick · /op /deop /voice /devoice /ban · /mode · /whois · /away · /ctcp · /dcc send|chat · /quit',
           'Scripts mIRC: /load archivo.mrc · /unload archivo.mrc · // evalúa identificadores (p. ej. //echo -a $me)',
         ]) this.line(sid, this.active.sid === sid ? this.active.buffer : STATUS, 'info', l);

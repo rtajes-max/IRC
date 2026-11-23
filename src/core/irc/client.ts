@@ -76,6 +76,10 @@ export class IrcClient extends EventEmitter {
   private keepalive: NodeJS.Timeout | null = null;
   /** Segundos sin recibir nada tras los que la conexión se da por caída (se puede ajustar en pruebas). */
   deadAfter = 240;
+  /** Último retardo medido con el servidor, en segundos (-1 si aún no se ha medido). */
+  lag = -1;
+  private lagTimer: NodeJS.Timeout | null = null;
+  private ctcpReplies: number[] = [];
 
   constructor(public opts: IrcOptions) {
     super();
@@ -147,6 +151,9 @@ export class IrcClient extends EventEmitter {
       this.drainTimer = null;
       if (this.keepalive) clearInterval(this.keepalive);
       this.keepalive = null;
+      if (this.lagTimer) clearInterval(this.lagTimer);
+      this.lagTimer = null;
+      this.lag = -1;
       this.socket = null;
       this.emit('close', { wasConnected: was, byUser: this.closedByUser });
     });
@@ -332,9 +339,19 @@ export class IrcClient extends EventEmitter {
       case 'PING':
         this.sendNow(formatMessage('PONG', [p[p.length - 1] ?? '']));
         return;
-      case 'PONG':
-        this.emit('pong', p[p.length - 1] ?? '');
+      case 'PONG': {
+        const payload = p[p.length - 1] ?? '';
+        // Respuesta a nuestra medición de retardo: «lag» + marca de tiempo.
+        if (payload.startsWith('lag')) {
+          const sent = Number(payload.slice(3));
+          if (sent > 0) {
+            this.lag = Math.max(0, (Date.now() - sent) / 1000);
+            this.emit('lag', this.lag);
+          }
+        }
+        this.emit('pong', payload);
         return;
+      }
       case 'CAP':
         this.handleCap(msg);
         return;
@@ -365,6 +382,9 @@ export class IrcClient extends EventEmitter {
         this.serverName = msg.prefix;
         this.emit('numeric', msg);
         this.emit('registered');
+        this.sendNow(`PING :lag${Date.now()}`);
+        this.lagTimer = setInterval(() => this.registered && this.sendNow(`PING :lag${Date.now()}`), 30000);
+        this.lagTimer.unref();
         for (const ch of this.opts.autojoin ?? []) if (ch.trim()) this.join(ch.trim());
         return;
       case '005':
@@ -623,9 +643,16 @@ export class IrcClient extends EventEmitter {
         return;
       }
       if (self) return;
-      if (cmd === 'VERSION') this.ctcpReply(msg.nick, 'VERSION', this.opts.version || 'Onda IRC');
-      else if (cmd === 'PING') this.ctcpReply(msg.nick, 'PING', args);
-      else if (cmd === 'TIME') this.ctcpReply(msg.nick, 'TIME', new Date().toString());
+      // Como mucho tres respuestas automáticas cada diez segundos: una ráfaga de CTCP no debe
+      // hacer que el propio cliente inunde al servidor.
+      const now = Date.now();
+      this.ctcpReplies = this.ctcpReplies.filter((t) => now - t < 10000);
+      if (['VERSION', 'PING', 'TIME'].includes(cmd) && this.ctcpReplies.length < 3) {
+        this.ctcpReplies.push(now);
+        if (cmd === 'VERSION') this.ctcpReply(msg.nick, 'VERSION', this.opts.version || 'Onda IRC');
+        else if (cmd === 'PING') this.ctcpReply(msg.nick, 'PING', args);
+        else this.ctcpReply(msg.nick, 'TIME', new Date().toString());
+      }
       this.emit('ctcp', { from: msg.nick, target, command: cmd, args, hostmask: base.hostmask });
       return;
     }

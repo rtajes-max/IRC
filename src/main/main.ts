@@ -13,7 +13,7 @@ function createWindow(): void {
     minWidth: 640,
     minHeight: 420,
     title: 'Onda IRC',
-    backgroundColor: '#14171c',
+    backgroundColor: '#ffffff',
     icon: path.join(__dirname, '..', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -32,6 +32,9 @@ function createWindow(): void {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.on('closed', () => (win = null));
 }
+
+// En pruebas, todo el estado (incluidas las preferencias de la ventana) va a la carpeta indicada.
+if (process.env.ONDA_DATA_DIR) app.setPath('userData', process.env.ONDA_DATA_DIR);
 
 app.whenReady().then(() => {
   const dataDir = process.env.ONDA_DATA_DIR || app.getPath('userData');

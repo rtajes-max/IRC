@@ -1,6 +1,6 @@
 {
   "name": "onda-irc",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Cliente IRC de escritorio moderno con scripting compatible con mIRC",
   "private": true,
   "license": "MIT",
@@ -40,7 +40,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Onda-IRC-Setup-${version}.${ext}"
     },
     "mac": {
       "target": "dmg",
@@ -50,6 +51,7 @@
     "linux": {
       "target": "AppImage",
       "category": "Network"
-    }
+    },
+    "artifactName": "Onda-IRC-${version}-${os}.${ext}"
   }
 }

@@ -1,6 +1,11 @@
 name: Instaladores
 on:
   workflow_dispatch:
+    inputs:
+      publicar:
+        description: Publicar como versión descargable (crea la etiqueta v<versión> y adjunta los instaladores)
+        type: boolean
+        default: false
   push:
     tags: ['v*']
   pull_request:
@@ -97,11 +102,27 @@ jobs:
             release/*.dmg
             release/*.AppImage
           if-no-files-found: error
-      - if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+
+  # Publica una versión con los instaladores de los tres sistemas, una sola vez, cuando los tres han compilado.
+  publicar:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publicar) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v6
         with:
-          files: |
-            release/*.exe
-            release/*.zip
-            release/*.dmg
-            release/*.AppImage
+          path: descargas
+          pattern: onda-irc-*
+          merge-multiple: true
+      - run: ls -la descargas
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+          target_commitish: ${{ github.sha }}
+          name: Onda IRC ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: descargas/*
