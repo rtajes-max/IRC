@@ -46,7 +46,7 @@ La aceptación la decide SignPath Foundation y no está garantizada.
    ```xml
    <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
      <zip-file>
-       <pe-file path="Onda IRC Setup *.exe">
+       <pe-file path="Onda-IRC-Setup-*.exe">
          <authenticode-sign/>
        </pe-file>
      </zip-file>

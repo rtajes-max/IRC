@@ -24,6 +24,20 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Abreviaturas de comandos**: `/j`, `/p`, `/q`, `/m`, `/w`, `/k`, `/t`, `/n`, `/c`, `/ns`, `/cs`, `/id`…
 - **Temas** oscuro, claro y clásico; colores y formato de mIRC; completado de nicks con Tab; historial de entrada.
 
+## Descargas
+
+Las versiones publicadas están en <https://github.com/rtajes-max/IRC/releases>. Cada una incluye:
+
+| Sistema | Archivo |
+|---|---|
+| Windows (instalador) | `Onda-IRC-Setup-<versión>.exe` |
+| Windows (portátil, sin instalar) | `Onda-IRC-<versión>-win.zip` |
+| macOS | `Onda-IRC-<versión>-mac.dmg` |
+| Linux | `Onda-IRC-<versión>-linux.AppImage` |
+
+No están firmadas, así que Windows y macOS mostrarán un aviso al abrirlas (ver «Code signing policy»).
+Para publicar una versión nueva: Actions → «Instaladores» → «Run workflow» con la casilla «Publicar» marcada.
+
 ## Uso
 
 ```bash
