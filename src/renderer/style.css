@@ -520,3 +520,14 @@ body.status-top #statusbar { order: 15; border-top: 0; border-bottom: 1px solid 
 /* En los temas claros el escritorio es algo más oscuro que las ventanas, para que se distingan. */
 :root[data-theme='light'] #desktop, :root[data-theme='classic'] #desktop { background: var(--panel-2); }
 :root[data-theme='light'] #sb-away, :root[data-theme='classic'] #sb-away { color: #a8650a; }
+
+/* Etiquetas de los puentes de mensajería */
+.net-tag[data-net='telegram'] { color: #1c7fc4; border-color: #1c7fc4; }
+.net-tag[data-net='whatsapp'] { color: #1a8a4a; border-color: #1a8a4a; }
+.net-tag[data-net='signal'] { color: #3a5fd0; border-color: #3a5fd0; }
+:root[data-theme='dark'] .net-tag[data-net='telegram'] { color: #6cc0f5; border-color: #6cc0f5; }
+:root[data-theme='dark'] .net-tag[data-net='whatsapp'] { color: #6fd596; border-color: #6fd596; }
+:root[data-theme='dark'] .net-tag[data-net='signal'] { color: #94adff; border-color: #94adff; }
+.nicks .count.bridge { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.nick-row.relayed { color: var(--text); }
+.nick-row.relayed .net-tag { font-size: 0.72em; }

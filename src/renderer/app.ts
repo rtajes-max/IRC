@@ -23,6 +23,8 @@ interface BufferState {
   highlight: boolean;
   typing: Map<string, number>;
   reactions: Map<string, string[]>;
+  /** Personas vistas a través de un puente (Telegram, WhatsApp, Signal…): nombre → red. */
+  relayed: Map<string, string>;
 }
 
 interface SessionState {
@@ -72,7 +74,7 @@ let zTop = 10;
 // ------------------------------------------------------------------ estado
 
 function newBuffer(name: string, type: BufferType): BufferState {
-  return { name, type, lines: [], nicks: [], topic: '', unread: 0, highlight: false, typing: new Map(), reactions: new Map() };
+  return { name, type, lines: [], nicks: [], topic: '', unread: 0, highlight: false, typing: new Map(), reactions: new Map(), relayed: new Map() };
 }
 
 function ensureSession(info: SessionInfo): SessionState {
@@ -442,6 +444,19 @@ function renderNicks(w: Win | undefined = winOf(active.sid, active.buffer)): voi
     row.addEventListener('click', menu);
     pane.append(row);
   }
+  if (b.relayed.size) {
+    pane.append(el('div', 'count bridge', 'Por puentes'));
+    for (const [name, network] of [...b.relayed].sort((x, y) => x[0].localeCompare(y[0]))) {
+      const row = el('button', 'nick-row relayed');
+      row.type = 'button';
+      const tag = el('span', 'net-tag', network);
+      tag.dataset.net = network.toLowerCase();
+      row.append(el('span', 'pfx', ''), document.createTextNode(name), tag);
+      row.title = `${name}, desde ${network}. Pulsa para mencionarle.`;
+      row.addEventListener('click', () => insertText(`${name}${(settings.nickSuffix || ':').trimEnd()} `));
+      pane.append(row);
+    }
+  }
 }
 
 interface ScriptMenuEntry {
@@ -563,7 +578,12 @@ function appendFormatted(parent: HTMLElement, text: string): void {
   }
 }
 
-const RELAY_NETWORKS: Record<string, string> = { tg: 'Telegram', wa: 'WhatsApp' };
+/** Etiquetas de los puentes de mensajería: lo que va tras la barra en «Nombre/etiqueta». */
+const RELAY_NETWORKS: Record<string, string> = {
+  tg: 'Telegram', telegram: 'Telegram', wa: 'WhatsApp', whatsapp: 'WhatsApp', sg: 'Signal', signal: 'Signal',
+  rcs: 'RCS', sms: 'SMS', im: 'iMessage', imsg: 'iMessage', imessage: 'iMessage',
+  mx: 'Matrix', matrix: 'Matrix', dc: 'Discord', discord: 'Discord',
+};
 
 /** Los puentes (relaymsg) usan nicks «Nombre/red», p. ej. «Ana/tg» para Telegram. */
 function splitRelay(nick: string): { name: string; network: string } {
@@ -596,7 +616,9 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
     if (relay.network) {
       nick.classList.add('relayed');
       nick.title = `${relay.name}, desde ${relay.network}`;
-      nick.append(el('span', 'net-tag', relay.network));
+      const tag = el('span', 'net-tag', relay.network);
+      tag.dataset.net = relay.network.toLowerCase();
+      nick.append(tag);
     } else nick.addEventListener('click', (e) => void nickMenu(e.clientX, e.clientY, line.nick!));
     row.append(nick);
   }
@@ -913,6 +935,14 @@ function onUi(ev: UiEvent): void {
       const b = getBuffer(ev.sid, ev.buffer) ?? getBuffer(ev.sid, STATUS) ?? getBuffer(LOCAL, STATUS)!;
       const sid = getBuffer(ev.sid, ev.buffer) || getBuffer(ev.sid, STATUS) ? ev.sid : LOCAL;
       b.lines.push(ev.line);
+      // Quien escribe a través de un puente no figura en la lista del canal: se le añade aparte.
+      if (ev.line.nick && b.type === 'channel') {
+        const relay = splitRelay(ev.line.nick);
+        if (relay.network && b.relayed.get(relay.name) !== relay.network) {
+          b.relayed.set(relay.name, relay.network);
+          renderNicks(winOf(sid, b.name));
+        }
+      }
       if (b.lines.length > MAX_LINES) b.lines.splice(0, b.lines.length - MAX_LINES);
       const lw = winOf(sid, b.name);
       if (lw) {
@@ -1059,13 +1089,13 @@ function tabComplete(): void {
       ? [...(s?.buffers.values() ?? [])].filter((x) => x.type === 'channel').map((x) => x.name)
       : word.startsWith('/')
         ? ['/join', '/part', '/msg', '/query', '/me', '/nick', '/topic', '/kick', '/op', '/deop', '/voice', '/whois', '/away', '/server', '/quit', '/dcc', '/load', '/help', '/clear', '/notice', '/mode', '/ctcp']
-        : (b?.nicks ?? []).map((n) => n.nick);
+        : [...(b?.nicks ?? []).map((n) => n.nick), ...(b?.relayed.keys() ?? [])];
     const matches = pool.filter((x) => x.toLowerCase().startsWith(word));
     if (!matches.length) return;
     completion = { start: pos - m[1].length, matches, index: 0, base: input.value.slice(pos) };
   } else completion.index = (completion.index + 1) % completion.matches.length;
   const pick = completion.matches[completion.index];
-  const suffix = completion.start === 0 && !/^[#/]/.test(pick) ? (settings.nickSuffix || ':') + ' ' : ' ';
+  const suffix = completion.start === 0 && !/^[#/]/.test(pick) ? (settings.nickSuffix || ':').trimEnd() + ' ' : ' ';
   input.value = input.value.slice(0, completion.start) + pick + suffix + completion.base;
   const caret = completion.start + pick.length + suffix.length;
   input.setSelectionRange(caret, caret);

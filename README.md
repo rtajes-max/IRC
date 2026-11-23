@@ -50,7 +50,7 @@ Como en mIRC, `/comando` no evalúa identificadores y `//comando` sí (`//echo -
 - Servidor Ergo; único puerto público: 6697 con TLS.
 - Cuentas: `/register contraseña` registra tu nick y guarda la cuenta en la red para identificarte sola al entrar (SASL).
   Un nick registrado exige autenticarse.
-- Los mensajes que llegan por el puente de Telegram usan nicks `Nombre/tg`; el cliente los muestra como «Nombre» con la etiqueta «Telegram».
+- Los mensajes que llegan por los puentes de mensajería usan nicks `Nombre/etiqueta` (`/tg` Telegram, `/wa` WhatsApp, `/sg` Signal, `/rcs` RCS, `/im` iMessage). El cliente los muestra como «Nombre» con la etiqueta de su red, los añade a la lista de nicks del canal en un apartado «Por puentes» y permite mencionarlos y completarlos con Tab.
 - El servidor oculta tu IP, pero un DCC es una conexión directa y la revela a la otra persona.
 
 ## Ejemplo de script
