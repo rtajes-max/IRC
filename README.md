@@ -15,6 +15,7 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
   avisos de amigos (`/notify`), comandos automáticos al conectar, lista de canales de la red («Canales» o `/list`) y búsqueda en la conversación (Ctrl+F).
 - **Registros** de conversación en texto plano, con buscador.
 - **Ventanas flotantes** como en mIRC, con aspecto moderno: cada canal, privado y estado es una ventana que se mueve, se redimensiona, se minimiza y se maximiza; se colocan en cascada o en mosaico. Barra de menús, barra de botones y barra de ventanas con avisos de no leídos.
+- **Menú de clic derecho**: copiar la selección, la línea o toda la conversación; copiar y abrir enlaces; copiar nicks y temas; cortar, copiar y pegar en las cajas de texto.
 - **Barras colocables**: la barra de ventanas va arriba, abajo, a la izquierda o a la derecha, y la de estado arriba o abajo (menú Ver, o clic derecho sobre la barra).
 - **Barra de iconos y barra de estado**: accesos rápidos compactos arriba; abajo, reloj, red, nick, lag, estado de ausencia y el último aviso pendiente. El título de la ventana muestra también el lag.
 - **Panel de control** con todo lo configurable: ajustes, redes, sistema de ausencia, teclas de función, ignorados, scripts, canales, transferencias y registros.

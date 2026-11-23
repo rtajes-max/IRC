@@ -531,3 +531,7 @@ body.status-top #statusbar { order: 15; border-top: 0; border-bottom: 1px solid 
 .nicks .count.bridge { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 .nick-row.relayed { color: var(--text); }
 .nick-row.relayed .net-tag { font-size: 0.72em; }
+
+/* El texto de las conversaciones se puede seleccionar y copiar. */
+.log { user-select: text; }
+.log ::selection { background: var(--accent); color: var(--accent-text); }
