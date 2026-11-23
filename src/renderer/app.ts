@@ -308,11 +308,41 @@ function ensureWin(sid: string, b: BufferState): Win {
   });
   // Clic derecho en la conversación: popups de los scripts para canal, privado o estado.
   wlog.addEventListener('contextmenu', async (e) => {
-    if ((e.target as HTMLElement).closest('a, .nick')) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('.nick') && !window.getSelection()?.toString()) return; // el nick tiene su propio menú
     e.preventDefault();
     const { clientX, clientY } = e;
-    const items = await scriptItems();
-    if (items.length) showMenu(clientX, clientY, items);
+    const selection = window.getSelection()?.toString() ?? '';
+    const link = t.closest('a') as HTMLAnchorElement | null;
+    const row = t.closest('.row') as HTMLElement | null;
+    const copyText = (text: string) => () => window.onda.invoke('clipboard:write', text);
+    const items: MenuItem[] = [];
+    if (selection) items.push(['Copiar', () => window.onda.invoke('edit', 'copy')]);
+    if (link) items.push(['Copiar enlace', copyText(link.href)], ['Abrir enlace', () => window.open(link.href, '_blank', 'noopener')]);
+    if (row?.dataset.plain) items.push(['Copiar esta línea', copyText(row.dataset.plain)]);
+    items.push(
+      ['Copiar toda la conversación', copyText([...wlog.querySelectorAll<HTMLElement>('.row')].map((r) => r.dataset.plain ?? '').filter(Boolean).join('\n'))],
+      ['Seleccionar todo', () => {
+        const range = document.createRange();
+        range.selectNodeContents(wlog);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }],
+      null,
+      ['Buscar…', () => $('btn-find').click()],
+      ['Limpiar la ventana', () => send('/clear')],
+    );
+    // Popups de los scripts para canal, privado o estado
+    const extra = await scriptItems();
+    if (extra.length) items.push(null, ...extra);
+    showMenu(clientX, clientY, items);
+  });
+  topic.addEventListener('contextmenu', (e) => {
+    const text = stripFormatting(getBuffer(sid, b.name)?.topic ?? '');
+    if (!text) return;
+    e.preventDefault();
+    showMenu(e.clientX, e.clientY, [['Copiar el tema', () => window.onda.invoke('clipboard:write', text)]]);
   });
   attachInput(w);
   renderHeader(w);
@@ -498,6 +528,7 @@ async function nickMenu(x: number, y: number, nick: string): Promise<void> {
     ['Conversación privada', () => send(`/query ${nick}`)],
     ['Información (whois)', () => send(`/whois ${nick}`)],
     ['Mencionar', () => insertText(nick + ': ')],
+    ['Copiar el nick', () => window.onda.invoke('clipboard:write', nick)],
     [settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'Dejar de ignorar' : 'Ignorar', () =>
       send(`/${settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'unignore' : 'ignore'} ${nick}`)],
     null,
@@ -540,6 +571,8 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
     });
     menu.append(b);
   }
+  // Dentro de un diálogo abierto el menú debe ir en él, o quedaría tapado.
+  (document.querySelector('dialog[open]') ?? document.body).append(menu);
   menu.hidden = false;
   const r = menu.getBoundingClientRect();
   menu.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4)) + 'px';
@@ -631,6 +664,14 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
     for (const r of b.reactions.get(line.msgid) ?? []) body.append(el('span', 'react', r));
   }
   row.append(body);
+  // Texto de la línea tal como se copia al portapapeles: [hora] <nick> mensaje
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const plain = stripFormatting(line.text);
+  row.dataset.plain =
+    line.kind === 'msg' ? `[${hhmm}] <${line.nick ?? ''}> ${plain}`
+    : line.kind === 'notice' ? `[${hhmm}] -${line.nick ?? ''}- ${plain}`
+    : line.kind === 'action' ? `[${hhmm}] * ${line.nick ?? ''} ${plain}`
+    : `[${hhmm}] ${line.kind === 'echo' ? '' : '* '}${plain}`;
   return row;
 }
 
@@ -1140,6 +1181,25 @@ function attachInput(w: Win): void {
     else notifyTyping('done');
   });
 }
+
+// Clic derecho en cualquier caja de texto: cortar, copiar, pegar y seleccionar todo.
+document.addEventListener('contextmenu', (e) => {
+  const box = (e.target as HTMLElement).closest('textarea, input') as HTMLInputElement | HTMLTextAreaElement | null;
+  if (!box || (box instanceof HTMLInputElement && ['checkbox', 'radio', 'number', 'button', 'submit'].includes(box.type))) return;
+  e.preventDefault();
+  const has = box.selectionStart !== box.selectionEnd;
+  const act = (action: string) => () => {
+    box.focus();
+    return window.onda.invoke('edit', action);
+  };
+  const editable = !box.readOnly && !box.disabled;
+  showMenu(e.clientX, e.clientY, [
+    ...(has && editable ? ([['Cortar', act('cut')]] as MenuItem[]) : []),
+    ...(has ? ([['Copiar', act('copy')]] as MenuItem[]) : []),
+    ...(editable ? ([['Pegar', act('paste')]] as MenuItem[]) : []),
+    ['Seleccionar todo', act('selectAll')],
+  ]);
+});
 
 document.addEventListener('click', (e) => {
   const menu = $('context-menu');

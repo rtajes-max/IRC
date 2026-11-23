@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 const CHANNELS = new Set([
   'snapshot', 'input', 'setActive', 'typing', 'closeBuffer', 'connect', 'network:remove', 'settings:update',
   'scripts:list', 'scripts:save', 'scripts:delete', 'logs:search', 'dcc:accept', 'dcc:reject', 'dcc:chat', 'dcc:send',
-  'dcc:reveal', 'menu:get', 'menu:run', 'dialog:event',
+  'dcc:reveal', 'menu:get', 'menu:run', 'dialog:event', 'edit', 'clipboard:write',
 ]);
 
 contextBridge.exposeInMainWorld('onda', {

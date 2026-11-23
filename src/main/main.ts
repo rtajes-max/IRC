@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain, safeStorage, shell } from 'electron';
+import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, safeStorage, shell } from 'electron';
 import * as path from 'node:path';
 import { AppCore } from '../core/app';
 import type { NetworkConfig, Settings, UiEvent } from '../core/types';
@@ -81,6 +81,16 @@ app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(win, { title: `Enviar archivo a ${nick}`, properties: ['openFile'] });
     if (!r.canceled && r.filePaths[0]) await core.dccSend(sid, nick, r.filePaths[0], passive === true);
   });
+  // Menú contextual: las acciones de edición las ejecuta la propia ventana sobre lo seleccionado.
+  h('edit', (action: string) => {
+    const wc = win?.webContents;
+    if (!wc) return;
+    if (action === 'copy') wc.copy();
+    else if (action === 'cut') wc.cut();
+    else if (action === 'paste') wc.paste();
+    else if (action === 'selectAll') wc.selectAll();
+  });
+  h('clipboard:write', (text: string) => clipboard.writeText(String(text).slice(0, 2_000_000)));
   h('dcc:reveal', (id: string) => {
     const d = core.snapshot().dccs.find((x) => x.id === id);
     if (d?.path) shell.showItemInFolder(d.path);
