@@ -1,51 +1,16 @@
-import { MIRC_COLORS, parseFormatting, stripFormatting } from '../core/irc/formatting';
+import { stripFormatting } from '../core/irc/formatting';
 import type {
-  BufferType, ChannelListEntry, DccInfo, DialogControlView, DialogView, Line, NetworkConfig, NickEntry, ScriptInfo, SessionInfo, Settings, Snapshot, UiEvent,
+  BufferType, ChannelListEntry, DccInfo, Line, NetworkConfig, NickEntry, ScriptInfo, SessionInfo, Settings, Snapshot, UiEvent,
 } from '../core/types';
+import { $, el, key } from './dom';
+import { appendFormatted, fmtSize, nickColor, splitRelay } from './format';
+import { MenuItem, showMenu } from './menu';
+import { syncDialog } from './script-dialogs';
+import { chanLists, dialog, listSid, loadScripts, renderChanList, renderDcc } from './dialogs';
+import {
+  BufferState, LOCAL, MAX_LINES, STATUS, activeBuffer, dccs, ensureSession, getBuffer, isActive, newBuffer, send, sessions, st,
+} from './state';
 
-const STATUS = '*';
-const LOCAL = 'local';
-const MAX_LINES = 2000;
-
-declare global {
-  interface Window {
-    onda: { invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T>; onUi(cb: (ev: UiEvent) => void): void };
-  }
-}
-
-interface BufferState {
-  name: string;
-  type: BufferType;
-  lines: Line[];
-  nicks: NickEntry[];
-  topic: string;
-  unread: number;
-  highlight: boolean;
-  typing: Map<string, number>;
-  reactions: Map<string, string[]>;
-  /** Personas vistas a través de un puente (Telegram, WhatsApp, Signal…): nombre → red. */
-  relayed: Map<string, string>;
-}
-
-interface SessionState {
-  info: SessionInfo;
-  buffers: Map<string, BufferState>;
-}
-
-const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] => {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text) e.textContent = text;
-  return e;
-};
-const key = (s: string) => s.toLowerCase();
-
-const sessions = new Map<string, SessionState>();
-let active = { sid: LOCAL, buffer: STATUS };
-let settings: Settings;
-let networks: NetworkConfig[] = [];
-const dccs = new Map<string, DccInfo>();
 const history: string[] = [];
 let historyPos = -1;
 
@@ -71,41 +36,13 @@ let log: HTMLElement = el('div');
 let input: HTMLTextAreaElement = el('textarea');
 let zTop = 10;
 
-// ------------------------------------------------------------------ estado
-
-function newBuffer(name: string, type: BufferType): BufferState {
-  return { name, type, lines: [], nicks: [], topic: '', unread: 0, highlight: false, typing: new Map(), reactions: new Map(), relayed: new Map() };
-}
-
-function ensureSession(info: SessionInfo): SessionState {
-  let s = sessions.get(info.sid);
-  if (!s) {
-    s = { info, buffers: new Map() };
-    sessions.set(info.sid, s);
-  } else s.info = info;
-  return s;
-}
-
-function getBuffer(sid: string, name: string, create?: BufferType): BufferState | undefined {
-  const s = sessions.get(sid);
-  if (!s) return undefined;
-  let b = s.buffers.get(key(name));
-  if (!b && create) {
-    b = newBuffer(name, create);
-    s.buffers.set(key(name), b);
-  }
-  return b;
-}
-
-const activeBuffer = () => getBuffer(active.sid, active.buffer);
-const isActive = (sid: string, buffer: string) => active.sid === sid && key(active.buffer) === key(buffer);
 
 function activate(sid: string, buffer: string, focus = true): void {
   const b = getBuffer(sid, buffer);
   if (!b) return;
   const w = ensureWin(sid, b);
   const changed = !isActive(sid, b.name);
-  active = { sid, buffer: b.name };
+  st.active = { sid, buffer: b.name };
   b.unread = 0;
   b.highlight = false;
   w.root.classList.remove('min');
@@ -198,7 +135,7 @@ function arrange(mode: 'cascade' | 'grid' | 'columns' | 'rows'): void {
     rememberWin(w);
     w.log.scrollTop = w.log.scrollHeight;
   }
-  const cur = winOf(active.sid, active.buffer);
+  const cur = winOf(st.active.sid, st.active.buffer);
   if (cur) cur.root.style.zIndex = String(++zTop);
 }
 
@@ -360,13 +297,6 @@ function removeWin(sid: string, buffer: string): void {
 
 // --------------------------------------------------------------- dibujado
 
-function nickColor(nick: string): string {
-  let h = 0;
-  for (const ch of nick.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  const light = document.documentElement.dataset.theme !== 'dark';
-  return `hsl(${h % 360} ${light ? '70% 32%' : '65% 68%'})`;
-}
-
 function renderTree(): void {
   const tree = $('tree');
   tree.replaceChildren();
@@ -437,7 +367,7 @@ function stateLabel(st: SessionInfo['state']): string {
   return { connecting: 'conectando', connected: 'conectado', disconnected: 'desconectado', local: 'local' }[st];
 }
 
-function renderHeader(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+function renderHeader(w: Win | undefined = winOf(st.active.sid, st.active.buffer)): void {
   if (!w) return;
   const b = getBuffer(w.sid, w.name);
   const s = sessions.get(w.sid);
@@ -449,10 +379,10 @@ function renderHeader(w: Win | undefined = winOf(active.sid, active.buffer)): vo
   if (b.type === 'status') w.topic.textContent = s.info.sid === LOCAL ? 'Consola' : stateLabel(s.info.state);
   else appendFormatted(w.topic, b.topic);
   w.topic.title = stripFormatting(b.topic);
-  w.mynick.textContent = s.info.sid === LOCAL ? settings.nick : s.info.nick;
+  w.mynick.textContent = s.info.sid === LOCAL ? st.settings.nick : s.info.nick;
 }
 
-function renderNicks(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+function renderNicks(w: Win | undefined = winOf(st.active.sid, st.active.buffer)): void {
   if (!w) return;
   const b = getBuffer(w.sid, w.name);
   const pane = w.nicks;
@@ -483,7 +413,7 @@ function renderNicks(w: Win | undefined = winOf(active.sid, active.buffer)): voi
       tag.dataset.net = network.toLowerCase();
       row.append(el('span', 'pfx', ''), document.createTextNode(name), tag);
       row.title = `${name}, desde ${network}. Pulsa para mencionarle.`;
-      row.addEventListener('click', () => insertText(`${name}${(settings.nickSuffix || ':').trimEnd()} `));
+      row.addEventListener('click', () => insertText(`${name}${(st.settings.nickSuffix || ':').trimEnd()} `));
       pane.append(row);
     }
   }
@@ -498,7 +428,7 @@ interface ScriptMenuEntry {
 
 /** Convierte los popups de los scripts en elementos de menú; los submenús se muestran sangrados bajo su título. */
 async function scriptItems(nick?: string): Promise<MenuItem[]> {
-  const { sid, buffer } = active;
+  const { sid, buffer } = st.active;
   let entries: ScriptMenuEntry[] = [];
   try {
     entries = await window.onda.invoke<ScriptMenuEntry[]>('menu:get', sid, buffer, nick);
@@ -521,7 +451,7 @@ async function scriptItems(nick?: string): Promise<MenuItem[]> {
 }
 
 async function nickMenu(x: number, y: number, nick: string): Promise<void> {
-  const sid = active.sid;
+  const sid = st.active.sid;
   const extra = await scriptItems(nick);
   const inChan = activeBuffer()?.type === 'channel';
   showMenu(x, y, [
@@ -529,8 +459,8 @@ async function nickMenu(x: number, y: number, nick: string): Promise<void> {
     ['Información (whois)', () => send(`/whois ${nick}`)],
     ['Mencionar', () => insertText(nick + ': ')],
     ['Copiar el nick', () => window.onda.invoke('clipboard:write', nick)],
-    [settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'Dejar de ignorar' : 'Ignorar', () =>
-      send(`/${settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'unignore' : 'ignore'} ${nick}`)],
+    [st.settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'Dejar de ignorar' : 'Ignorar', () =>
+      send(`/${st.settings.ignore.some((m) => m.toLowerCase() === nick.toLowerCase()) ? 'unignore' : 'ignore'} ${nick}`)],
     null,
     ...(inChan
       ? ([
@@ -546,84 +476,6 @@ async function nickMenu(x: number, y: number, nick: string): Promise<void> {
     ['Chat directo (DCC)', () => window.onda.invoke('dcc:chat', sid, nick)],
     ...(extra.length ? [null, ...extra] : []),
   ]);
-}
-
-type MenuItem = [string, (() => unknown) | null] | null;
-
-function showMenu(x: number, y: number, items: MenuItem[]): void {
-  const menu = $('context-menu');
-  menu.replaceChildren();
-  for (const it of items) {
-    if (!it) {
-      menu.append(el('hr'));
-      continue;
-    }
-    const action = it[1];
-    if (!action) {
-      menu.append(el('div', 'menu-title', it[0]));
-      continue;
-    }
-    const b = el('button', '', it[0]);
-    b.type = 'button';
-    b.addEventListener('click', () => {
-      menu.hidden = true;
-      void action();
-    });
-    menu.append(b);
-  }
-  // Dentro de un diálogo abierto el menú debe ir en él, o quedaría tapado.
-  (document.querySelector('dialog[open]') ?? document.body).append(menu);
-  menu.hidden = false;
-  const r = menu.getBoundingClientRect();
-  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4)) + 'px';
-  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) + 'px';
-  (menu.querySelector('button') as HTMLElement | null)?.focus();
-}
-
-function appendFormatted(parent: HTMLElement, text: string): void {
-  for (const seg of parseFormatting(text)) {
-    const span = el('span');
-    if (seg.bold) span.style.fontWeight = '700';
-    if (seg.italic) span.style.fontStyle = 'italic';
-    const deco = [seg.underline ? 'underline' : '', seg.strike ? 'line-through' : ''].filter(Boolean).join(' ');
-    if (deco) span.style.textDecoration = deco;
-    if (seg.mono) span.style.fontFamily = 'var(--mono)';
-    let fg = seg.fg !== undefined ? MIRC_COLORS[seg.fg % 16] : '';
-    let bg = seg.bg !== undefined ? MIRC_COLORS[seg.bg % 16] : '';
-    if (seg.reverse) [fg, bg] = [bg || 'var(--bg)', fg || 'var(--text)'];
-    if (fg) span.style.color = fg;
-    if (bg) span.style.backgroundColor = bg;
-    // Enlaces: solo http(s), y siempre se abren fuera de la aplicación.
-    const re = /https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
-    let last = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(seg.text))) {
-      if (m.index > last) span.append(seg.text.slice(last, m.index));
-      const a = el('a', '', m[0]);
-      a.href = m[0];
-      a.target = '_blank';
-      a.rel = 'noreferrer noopener';
-      span.append(a);
-      last = m.index + m[0].length;
-    }
-    if (last < seg.text.length) span.append(seg.text.slice(last));
-    parent.append(span);
-  }
-}
-
-/** Etiquetas de los puentes de mensajería: lo que va tras la barra en «Nombre/etiqueta». */
-const RELAY_NETWORKS: Record<string, string> = {
-  tg: 'Telegram', telegram: 'Telegram', wa: 'WhatsApp', whatsapp: 'WhatsApp', sg: 'Signal', signal: 'Signal',
-  rcs: 'RCS', sms: 'SMS', im: 'iMessage', imsg: 'iMessage', imessage: 'iMessage',
-  mx: 'Matrix', matrix: 'Matrix', dc: 'Discord', discord: 'Discord',
-};
-
-/** Los puentes (relaymsg) usan nicks «Nombre/red», p. ej. «Ana/tg» para Telegram. */
-function splitRelay(nick: string): { name: string; network: string } {
-  const i = nick.lastIndexOf('/');
-  if (i <= 0 || i === nick.length - 1) return { name: nick, network: '' };
-  const label = nick.slice(i + 1);
-  return { name: nick.slice(0, i), network: RELAY_NETWORKS[label.toLowerCase()] ?? label };
 }
 
 let findQuery = '';
@@ -675,7 +527,7 @@ function lineRow(b: BufferState, line: Line): HTMLElement {
   return row;
 }
 
-function renderLog(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+function renderLog(w: Win | undefined = winOf(st.active.sid, st.active.buffer)): void {
   if (!w) return;
   const b = getBuffer(w.sid, w.name);
   w.log.replaceChildren();
@@ -687,7 +539,7 @@ function renderLog(w: Win | undefined = winOf(active.sid, active.buffer)): void 
   w.log.scrollTop = w.log.scrollHeight;
 }
 
-function renderTyping(w: Win | undefined = winOf(active.sid, active.buffer)): void {
+function renderTyping(w: Win | undefined = winOf(st.active.sid, st.active.buffer)): void {
   if (!w) return;
   const b = getBuffer(w.sid, w.name);
   const names = b ? [...b.typing.keys()] : [];
@@ -701,236 +553,10 @@ function renderTyping(w: Win | undefined = winOf(active.sid, active.buffer)): vo
 }
 
 function applySettings(): void {
-  document.documentElement.dataset.theme = settings.theme;
-  document.documentElement.dataset.layout = settings.layout;
-  document.documentElement.style.setProperty('--size', settings.fontSize + 'px');
-  desktop.classList.toggle('no-times', !settings.showTimestamps);
-}
-
-function renderDcc(): void {
-  const list = $('dcc-list');
-  list.replaceChildren();
-  const pending = [...dccs.values()].filter((d) => d.status === 'offered').length;
-  const badge = $('dcc-badge');
-  badge.hidden = pending === 0;
-  badge.textContent = String(pending);
-  if (!dccs.size) list.append(el('div', 'empty', 'No hay transferencias. Para enviar un archivo, haz clic en un nick y elige «Enviar archivo…».'));
-  const status: Record<DccInfo['status'], string> = {
-    offered: 'pendiente de aceptar', waiting: 'esperando al destinatario', active: 'en curso', done: 'completado', failed: 'fallido', rejected: 'cancelado',
-  };
-  for (const d of [...dccs.values()].reverse()) {
-    const row = el('div', 'dcc');
-    const what = el('div', 'what');
-    const dir = d.direction === 'in' ? `de ${d.nick}` : `para ${d.nick}`;
-    what.append(el('div', '', d.type === 'SEND' ? `${d.filename} (${fmtSize(d.size)}) ${dir}` : `Chat directo ${d.direction === 'in' ? 'solicitado por' : 'con'} ${d.nick}`));
-    what.append(el('div', 'sub', status[d.status] + (d.error ? `: ${d.error}` : '')));
-    if (d.type === 'SEND' && d.status === 'active' && d.size) {
-      const p = el('progress');
-      p.max = d.size;
-      p.value = d.transferred;
-      what.append(p);
-    }
-    row.append(what);
-    const btn = (label: string, cls: string, fn: () => unknown) => {
-      const b = el('button', cls, label);
-      b.type = 'button';
-      b.addEventListener('click', () => void fn());
-      row.append(b);
-    };
-    if (d.status === 'offered') {
-      btn('Aceptar', 'primary', () => window.onda.invoke('dcc:accept', d.id));
-      btn('Rechazar', '', () => window.onda.invoke('dcc:reject', d.id));
-    } else if (d.status === 'active' || d.status === 'waiting') btn('Cancelar', '', () => window.onda.invoke('dcc:reject', d.id));
-    else if (d.status === 'done' && d.path) btn('Mostrar en carpeta', '', () => window.onda.invoke('dcc:reveal', d.id));
-    list.append(row);
-  }
-}
-
-function fmtSize(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  return `${(n / 1024 ** 3).toFixed(2)} GB`;
-}
-
-// ---------------------------------------------------- diálogos de scripts
-
-const openDialogs = new Map<string, { root: HTMLElement; controls: Map<number, HTMLElement> }>();
-
-function dialogSend(name: string, event: string, id: number, value?: { text?: string; checked?: boolean; sel?: number }): void {
-  void window.onda.invoke('dialog:event', name, event, id, value);
-}
-
-/** Crea o actualiza la ventana de un diálogo de script; con `view` nulo la cierra. */
-function syncDialog(name: string, view: DialogView | null): void {
-  const k = key(name);
-  let entry = openDialogs.get(k);
-  if (!view) {
-    entry?.root.remove();
-    openDialogs.delete(k);
-    return;
-  }
-  // Las tablas en «dbu» usan unidades de diálogo: aproximadamente 2 px por unidad.
-  const scale = view.dbu ? 2 : 1;
-  if (!entry) {
-    const root = el('section', 'msl-dialog');
-    root.setAttribute('role', 'dialog');
-    root.setAttribute('aria-label', view.title);
-    const bar = el('header');
-    const title = el('span', 'title', view.title);
-    const close = el('button', 'x', '×');
-    close.type = 'button';
-    close.setAttribute('aria-label', 'Cerrar');
-    close.addEventListener('click', () => dialogSend(view.name, 'close', 0));
-    bar.append(title, close);
-    const body = el('div', 'body');
-    body.style.width = view.w * scale + 'px';
-    body.style.height = view.h * scale + 'px';
-    root.append(bar, body);
-    const offset = openDialogs.size * 24;
-    root.style.left = `max(8px, calc(50% - ${(view.w * scale) / 2}px + ${offset}px))`;
-    root.style.top = `${90 + offset}px`;
-    // Arrastrar por la barra de título
-    bar.addEventListener('pointerdown', (e) => {
-      if ((e.target as HTMLElement).closest('button')) return;
-      const r = root.getBoundingClientRect();
-      const dx = e.clientX - r.left;
-      const dy = e.clientY - r.top;
-      const move = (m: PointerEvent) => {
-        root.style.left = Math.max(0, Math.min(window.innerWidth - 60, m.clientX - dx)) + 'px';
-        root.style.top = Math.max(0, Math.min(window.innerHeight - 30, m.clientY - dy)) + 'px';
-      };
-      const up = () => {
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', up);
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', up);
-    });
-    entry = { root, controls: new Map() };
-    openDialogs.set(k, entry);
-    let strip: HTMLElement | null = null;
-    for (const c of view.controls) {
-      const node = makeDialogControl(view.name, c);
-      if (c.type === 'tab') {
-        // Todas las pestañas comparten una tira situada donde indica la primera.
-        if (!strip) {
-          strip = el('div', 'ctl tabs');
-          strip.setAttribute('role', 'tablist');
-          strip.style.left = c.x * scale + 'px';
-          strip.style.top = c.y * scale + 'px';
-          body.append(strip);
-        }
-        node.classList.add('tab');
-        entry.controls.set(c.id, node);
-        strip.append(node);
-        continue;
-      }
-      node.classList.add('ctl', 'ctl-' + c.type);
-      node.style.left = c.x * scale + 'px';
-      node.style.top = c.y * scale + 'px';
-      node.style.width = c.w * scale + 'px';
-      if (c.type !== 'combo' && c.type !== 'check' && c.type !== 'radio') node.style.height = c.h * scale + 'px';
-      entry.controls.set(c.id, node);
-      body.append(node);
-    }
-    $('script-dialogs').append(root);
-  }
-  entry.root.querySelector('.title')!.textContent = view.title;
-  const activeTab = view.controls.find((c) => c.type === 'tab' && c.checked)?.id;
-  for (const c of view.controls) {
-    const node = entry.controls.get(c.id);
-    if (!node) continue;
-    updateDialogControl(node, c);
-    // Un control con estilo `tab N` solo se ve cuando la pestaña N está seleccionada.
-    const owner = c.styles.indexOf('tab');
-    if (c.type !== 'tab' && owner !== -1 && activeTab !== undefined && Number(c.styles[owner + 1]) !== activeTab) node.hidden = true;
-  }
-}
-
-function makeDialogControl(dname: string, c: DialogControlView): HTMLElement {
-  switch (c.type) {
-    case 'edit': {
-      const multi = c.styles.includes('multi');
-      const e = multi ? el('textarea') : el('input');
-      if (!multi && c.styles.includes('pass')) (e as HTMLInputElement).type = 'password';
-      if (c.styles.includes('read')) e.readOnly = true;
-      e.addEventListener('input', () => dialogSend(dname, 'edit', c.id, { text: e.value }));
-      return e;
-    }
-    case 'button': {
-      const b = el('button');
-      b.type = 'button';
-      if (c.styles.includes('default') || c.styles.includes('ok')) b.classList.add('primary');
-      b.addEventListener('click', () => dialogSend(dname, 'sclick', c.id));
-      return b;
-    }
-    case 'check':
-    case 'radio': {
-      const label = el('label');
-      const box = el('input');
-      box.type = c.type === 'check' ? 'checkbox' : 'radio';
-      box.addEventListener('change', () => dialogSend(dname, 'sclick', c.id, { checked: box.checked }));
-      label.append(box, el('span'));
-      return label;
-    }
-    case 'list': {
-      const sel = el('select');
-      sel.size = 4;
-      sel.addEventListener('change', () => dialogSend(dname, 'sclick', c.id, { sel: sel.selectedIndex + 1 }));
-      sel.addEventListener('dblclick', () => dialogSend(dname, 'dclick', c.id, { sel: sel.selectedIndex + 1 }));
-      return sel;
-    }
-    case 'combo': {
-      const sel = el('select');
-      sel.addEventListener('change', () => dialogSend(dname, 'sclick', c.id, { sel: sel.selectedIndex + 1 }));
-      return sel;
-    }
-    case 'box':
-      return el('fieldset');
-    case 'tab': {
-      const b = el('button');
-      b.type = 'button';
-      b.setAttribute('role', 'tab');
-      b.addEventListener('click', () => dialogSend(dname, 'sclick', c.id));
-      return b;
-    }
-    default:
-      return el('div');
-  }
-}
-
-function updateDialogControl(node: HTMLElement, c: DialogControlView): void {
-  node.hidden = !c.visible;
-  const setDisabled = (e: Element) => ((e as HTMLInputElement).disabled = !c.enabled);
-  if (c.type === 'edit') {
-    const e = node as HTMLInputElement;
-    if (e.value !== c.text) e.value = c.text;
-    setDisabled(e);
-  } else if (c.type === 'tab') {
-    node.textContent = c.text.replace(/&/g, '');
-    node.classList.toggle('selected', c.checked);
-    node.setAttribute('aria-selected', String(c.checked));
-    setDisabled(node);
-  } else if (c.type === 'button') {
-    node.textContent = c.text.replace(/&/g, '');
-    setDisabled(node);
-  } else if (c.type === 'check' || c.type === 'radio') {
-    const box = node.querySelector('input')!;
-    box.checked = c.checked;
-    setDisabled(box);
-    node.querySelector('span')!.textContent = c.text.replace(/&/g, '');
-  } else if (c.type === 'list' || c.type === 'combo') {
-    const sel = node as HTMLSelectElement;
-    const current = [...sel.options].map((o) => o.textContent);
-    if (current.length !== c.lines.length || current.some((t, i) => t !== c.lines[i])) {
-      sel.replaceChildren(...c.lines.map((l) => el('option', '', l)));
-    }
-    sel.selectedIndex = c.sel - 1;
-    setDisabled(sel);
-  } else if (c.type === 'box') {
-    node.replaceChildren(el('legend', '', c.text));
-  } else node.textContent = c.text;
+  document.documentElement.dataset.theme = st.settings.theme;
+  document.documentElement.dataset.layout = st.settings.layout;
+  document.documentElement.style.setProperty('--size', st.settings.fontSize + 'px');
+  desktop.classList.toggle('no-times', !st.settings.showTimestamps);
 }
 
 // ----------------------------------------------------------------- eventos
@@ -950,7 +576,7 @@ function onUi(ev: UiEvent): void {
     case 'session:remove':
       for (const w of [...wins.values()]) if (w.sid === ev.sid) removeWin(w.sid, w.name);
       sessions.delete(ev.sid);
-      if (active.sid === ev.sid) activate(LOCAL, STATUS);
+      if (st.active.sid === ev.sid) activate(LOCAL, STATUS);
       else renderTree();
       break;
     case 'buffer:add':
@@ -1006,7 +632,7 @@ function onUi(ev: UiEvent): void {
           }
           renderTree();
         }
-        if (ev.line.highlight && settings.notifications && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        if (ev.line.highlight && st.settings.notifications && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
           const n = new Notification(`${ev.line.nick ?? ''} en ${b.name}`, { body: stripFormatting(ev.line.text).slice(0, 200), silent: false });
           n.onclick = () => {
             window.focus();
@@ -1071,7 +697,7 @@ function onUi(ev: UiEvent): void {
       if ($<HTMLDialogElement>('dlg-scripts').open) void loadScripts(false);
       break;
     case 'settings':
-      settings = ev.settings;
+      st.settings = ev.settings;
       applySettings();
       renderStatus();
       for (const w of wins.values()) {
@@ -1084,10 +710,6 @@ function onUi(ev: UiEvent): void {
 }
 
 // ----------------------------------------------------------------- entrada
-
-function send(text: string): void {
-  void window.onda.invoke('input', active.sid, active.buffer, text);
-}
 
 function insertText(text: string): void {
   input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
@@ -1104,7 +726,7 @@ function autosize(): void {
 let typingSent = 0;
 function notifyTyping(state: 'active' | 'done'): void {
   const b = activeBuffer();
-  if (!b || b.type === 'status' || b.type === 'dcc' || !settings.sendTyping) return;
+  if (!b || b.type === 'status' || b.type === 'dcc' || !st.settings.sendTyping) return;
   if (state === 'active') {
     if (Date.now() - typingSent < 3000) return;
     typingSent = Date.now();
@@ -1112,7 +734,7 @@ function notifyTyping(state: 'active' | 'done'): void {
     if (!typingSent) return;
     typingSent = 0;
   }
-  void window.onda.invoke('typing', active.sid, active.buffer, state);
+  void window.onda.invoke('typing', st.active.sid, st.active.buffer, state);
 }
 
 let completion: { start: number; matches: string[]; index: number; base: string } | null = null;
@@ -1125,7 +747,7 @@ function tabComplete(): void {
     if (!m) return;
     const word = m[1].toLowerCase();
     const b = activeBuffer();
-    const s = sessions.get(active.sid);
+    const s = sessions.get(st.active.sid);
     const pool = word.startsWith('#')
       ? [...(s?.buffers.values() ?? [])].filter((x) => x.type === 'channel').map((x) => x.name)
       : word.startsWith('/')
@@ -1136,7 +758,7 @@ function tabComplete(): void {
     completion = { start: pos - m[1].length, matches, index: 0, base: input.value.slice(pos) };
   } else completion.index = (completion.index + 1) % completion.matches.length;
   const pick = completion.matches[completion.index];
-  const suffix = completion.start === 0 && !/^[#/]/.test(pick) ? (settings.nickSuffix || ':').trimEnd() + ' ' : ' ';
+  const suffix = completion.start === 0 && !/^[#/]/.test(pick) ? (st.settings.nickSuffix || ':').trimEnd() + ' ' : ' ';
   input.value = input.value.slice(0, completion.start) + pick + suffix + completion.base;
   const caret = completion.start + pick.length + suffix.length;
   input.setSelectionRange(caret, caret);
@@ -1218,194 +840,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------------------------------------------------------------- diálogos
-
-function dialog(id: string): HTMLDialogElement {
-  return $<HTMLDialogElement>(id);
-}
-document.querySelectorAll<HTMLButtonElement>('dialog .close').forEach((b) =>
-  b.addEventListener('click', (e) => {
-    e.preventDefault();
-    b.closest('dialog')!.close();
-  }),
-);
-
-// Conectar
-function fillConnect(n: Partial<NetworkConfig>): void {
-  const f = $<HTMLFormElement>('connect-form');
-  const set = (name: string, v: string | boolean) => {
-    const i = f.elements.namedItem(name) as HTMLInputElement;
-    if (i.type === 'checkbox') i.checked = !!v;
-    else i.value = String(v ?? '');
-  };
-  set('name', n.name ?? '');
-  set('host', n.host ?? '');
-  set('port', String(n.port ?? 6697));
-  set('tls', n.tls ?? true);
-  set('nick', n.nick || settings.nick);
-  set('autojoin', (n.autojoin ?? []).join(', '));
-  set('saslAccount', n.saslAccount ?? '');
-  set('saslPassword', n.saslPassword ?? '');
-  set('password', n.password ?? '');
-  set('allowInvalidCert', n.allowInvalidCert ?? false);
-  set('autoconnect', n.autoconnect ?? false);
-  (f.elements.namedItem('perform') as HTMLTextAreaElement).value = (n.perform ?? []).join('\n');
-}
-
-function renderSaved(): void {
-  const box = $('saved-networks');
-  box.replaceChildren();
-  for (const n of networks) {
-    const chip = el('span', 'chip');
-    const pick = el('button', '', n.name);
-    pick.type = 'button';
-    pick.title = `${n.host}:${n.port}`;
-    pick.addEventListener('click', () => fillConnect(n));
-    const x = el('button', 'x', '×');
-    x.type = 'button';
-    x.setAttribute('aria-label', `Olvidar ${n.name}`);
-    x.addEventListener('click', async () => {
-      await window.onda.invoke('network:remove', n.name);
-      networks = networks.filter((k) => k.name !== n.name);
-      renderSaved();
-    });
-    chip.append(pick, x);
-    box.append(chip);
-  }
-}
-
-$('btn-connect').addEventListener('click', () => {
-  fillConnect(networks[0] ?? { name: 'RogerNet', host: 'irc.rogertp.es', autojoin: ['#general'] });
-  renderSaved();
-  dialog('dlg-connect').showModal();
-});
-($<HTMLFormElement>('connect-form').elements.namedItem('tls') as HTMLInputElement).addEventListener('change', (e) => {
-  const port = $<HTMLFormElement>('connect-form').elements.namedItem('port') as HTMLInputElement;
-  const on = (e.target as HTMLInputElement).checked;
-  if (on && port.value === '6667') port.value = '6697';
-  if (!on && port.value === '6697') port.value = '6667';
-});
-$('connect-form').addEventListener('submit', async () => {
-  const f = new FormData($<HTMLFormElement>('connect-form'));
-  const str = (k: string) => String(f.get(k) ?? '').trim();
-  const cfg: NetworkConfig = {
-    name: str('name') || str('host'),
-    host: str('host'),
-    port: Number(str('port')) || 6697,
-    tls: f.has('tls'),
-    nick: str('nick'),
-    autojoin: str('autojoin').split(/[\s,]+/).filter(Boolean).map((c) => (/^[#&]/.test(c) ? c : '#' + c)),
-    saslAccount: str('saslAccount') || undefined,
-    saslPassword: String(f.get('saslPassword') ?? '') || undefined,
-    password: String(f.get('password') ?? '') || undefined,
-    allowInvalidCert: f.has('allowInvalidCert'),
-    autoconnect: f.has('autoconnect'),
-    perform: String(f.get('perform') ?? '').split('\n').map((l) => l.trim()).filter(Boolean),
-  };
-  if (f.has('save')) networks = [...networks.filter((n) => n.name !== cfg.name), cfg];
-  await window.onda.invoke('connect', cfg, f.has('save'));
-});
-
-// Ajustes
-$('btn-settings').addEventListener('click', () => {
-  const f = $<HTMLFormElement>('settings-form');
-  for (const [k, v] of Object.entries(settings)) {
-    const i = f.elements.namedItem(k) as HTMLInputElement | null;
-    if (!i) continue;
-    if (i.type === 'checkbox') i.checked = !!v;
-    else i.value = String(v);
-  }
-  dialog('dlg-settings').showModal();
-});
-$('settings-form').addEventListener('submit', async () => {
-  const f = new FormData($<HTMLFormElement>('settings-form'));
-  const wantsNotif = f.has('notifications');
-  if (wantsNotif && typeof Notification !== 'undefined' && Notification.permission === 'default') await Notification.requestPermission();
-  await window.onda.invoke('settings:update', {
-    nick: String(f.get('nick')).trim() || settings.nick,
-    realname: String(f.get('realname')),
-    quitMessage: String(f.get('quitMessage')),
-    theme: String(f.get('theme')) as Settings['theme'],
-    layout: String(f.get('layout')) === 'modern' ? 'modern' : 'classic',
-    fontSize: Math.min(24, Math.max(10, Number(f.get('fontSize')) || 14)),
-    showTimestamps: f.has('showTimestamps'),
-    logging: f.has('logging'),
-    notifications: wantsNotif,
-    sendTyping: f.has('sendTyping'),
-    floodProtect: f.has('floodProtect'),
-    nickSuffix: String(f.get('nickSuffix') ?? '').trim().slice(0, 4) || ':',
-  } satisfies Partial<Settings>);
-});
-
-// Scripts
-let scripts: ScriptInfo[] = [];
-let currentScript = '';
-const EXAMPLE = `; Ejemplo: responde a "!hola" en cualquier canal
-on *:TEXT:!hola*:#:{
-  msg $chan ¡Hola, $nick $+ !
-}
-
-; Alias: escribe /saluda nick
-alias saluda {
-  me saluda a $1
-}
-`;
-
-function showScript(s: { name: string; source: string; warnings: string[] } | null): void {
-  currentScript = s?.name ?? '';
-  $<HTMLInputElement>('script-name').value = s?.name ?? 'nuevo.mrc';
-  $<HTMLTextAreaElement>('script-source').value = s?.source ?? EXAMPLE;
-  scriptStatus(s?.warnings ?? []);
-  $('script-list').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.textContent === currentScript));
-}
-
-function scriptStatus(warnings: string[], ok = ''): void {
-  const st = $('script-status');
-  st.className = warnings.length ? 'warn' : '';
-  st.textContent = warnings.length ? 'Avisos:\n' + warnings.map((w) => '· ' + w).join('\n') : ok;
-}
-
-async function loadScripts(reset = true): Promise<void> {
-  scripts = await window.onda.invoke<ScriptInfo[]>('scripts:list');
-  const list = $('script-list');
-  list.replaceChildren();
-  for (const s of scripts) {
-    const b = el('button', s.name === currentScript ? 'active' : '', s.name);
-    b.type = 'button';
-    b.addEventListener('click', () => showScript(s));
-    list.append(b);
-  }
-  if (reset) showScript(scripts.find((s) => s.name === currentScript) ?? scripts[0] ?? null);
-}
-
-$('btn-scripts').addEventListener('click', async () => {
-  await loadScripts();
-  dialog('dlg-scripts').showModal();
-});
-$('script-new').addEventListener('click', () => showScript(null));
-$('script-save').addEventListener('click', async () => {
-  const name = $<HTMLInputElement>('script-name').value.trim();
-  if (!name) return;
-  const saved = await window.onda.invoke<ScriptInfo>('scripts:save', name, $<HTMLTextAreaElement>('script-source').value);
-  currentScript = saved.name;
-  await loadScripts(false);
-  $<HTMLInputElement>('script-name').value = saved.name;
-  scriptStatus(saved.warnings, `Guardado y cargado: ${saved.name}`);
-});
-$('script-delete').addEventListener('click', async () => {
-  if (!currentScript) return;
-  await window.onda.invoke('scripts:delete', currentScript);
-  currentScript = '';
-  await loadScripts();
-});
-$<HTMLTextAreaElement>('script-source').addEventListener('keydown', (e) => {
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    const t = e.target as HTMLTextAreaElement;
-    t.setRangeText('  ', t.selectionStart, t.selectionEnd, 'end');
-  }
-});
-
 // Barra de menús y opciones de «Ver» (se recuerdan en este equipo)
 type Edge = 'top' | 'bottom' | 'left' | 'right';
 const view: { tree: boolean; nicks: boolean; switchbar: boolean; toolbar: boolean; statusbar: boolean; switchPos: Edge; statusPos: 'top' | 'bottom' } = {
@@ -1455,7 +889,7 @@ function menuItems(name: string): MenuItem[] {
         ['Desconectar', () => send('/disconnect')],
         ['Reconectar', () => send('/reconnect')],
         null,
-        ['Cerrar ventana', () => active.sid !== LOCAL || active.buffer.startsWith('@') ? window.onda.invoke('closeBuffer', active.sid, active.buffer) : undefined],
+        ['Cerrar ventana', () => st.active.sid !== LOCAL || st.active.buffer.startsWith('@') ? window.onda.invoke('closeBuffer', st.active.sid, st.active.buffer) : undefined],
         ['Salir', () => window.close()],
       ];
     case 'ver':
@@ -1485,14 +919,14 @@ function menuItems(name: string): MenuItem[] {
           },
         ]),
         null,
-        [tick(settings.showTimestamps, 'Mostrar la hora'), () => window.onda.invoke('settings:update', { showTimestamps: !settings.showTimestamps })],
+        [tick(st.settings.showTimestamps, 'Mostrar la hora'), () => window.onda.invoke('settings:update', { showTimestamps: !st.settings.showTimestamps })],
         null,
         ...(['classic', 'dark', 'light'] as const).map((t): MenuItem => [
-          tick(settings.theme === t, { classic: 'Tema clásico', dark: 'Tema oscuro', light: 'Tema claro' }[t]),
+          tick(st.settings.theme === t, { classic: 'Tema clásico', dark: 'Tema oscuro', light: 'Tema claro' }[t]),
           () => window.onda.invoke('settings:update', { theme: t }),
         ]),
         null,
-        [tick(settings.layout === 'classic', 'Texto compacto (estilo IRC)'), () => window.onda.invoke('settings:update', { layout: settings.layout === 'classic' ? 'modern' : 'classic' })],
+        [tick(st.settings.layout === 'classic', 'Texto compacto (estilo IRC)'), () => window.onda.invoke('settings:update', { layout: st.settings.layout === 'classic' ? 'modern' : 'classic' })],
       ];
     case 'herramientas':
       return [
@@ -1607,7 +1041,7 @@ $('statusbar').addEventListener('contextmenu', (e) => {
 let lastNote: { sid: string; buffer: string; text: string } | null = null;
 
 function renderStatus(): void {
-  const s = sessions.get(active.sid);
+  const s = sessions.get(st.active.sid);
   const b = activeBuffer();
   const d = new Date();
   $('sb-clock').textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -1615,12 +1049,12 @@ function renderStatus(): void {
   const net = $('sb-net');
   net.className = real ? real.info.state : '';
   net.textContent = real ? `${real.info.name} (${stateLabel(real.info.state)})` : 'Sin conexión';
-  $('sb-nick').textContent = real ? real.info.nick : settings.nick;
+  $('sb-nick').textContent = real ? real.info.nick : st.settings.nick;
   const lag = real && real.info.state === 'connected' && (real.info.lag ?? -1) >= 0 ? real.info.lag! : -1;
   $('sb-lag').textContent = lag >= 0 ? `Lag: ${lag.toFixed(lag < 10 ? 2 : 0)} s` : '';
   $('sb-away').hidden = !real?.info.away;
   $('btn-away').classList.toggle('on', !!real?.info.away);
-  $('sb-log').textContent = settings.logging ? 'Registro activado' : 'Registro desactivado';
+  $('sb-log').textContent = st.settings.logging ? 'Registro activado' : 'Registro desactivado';
   const note = $('sb-note');
   if (lastNote && isActive(lastNote.sid, lastNote.buffer)) lastNote = null;
   note.hidden = !lastNote;
@@ -1643,113 +1077,10 @@ $('btn-query').addEventListener('click', () => insertText('/query '));
 $('btn-away').addEventListener('click', () => send('/away'));
 document.addEventListener('keydown', (e) => {
   if (!/^F([1-9]|1[0-2])$/.test(e.key) || e.ctrlKey || e.altKey || e.metaKey) return;
-  const cmd = settings.fkeys?.[e.shiftKey ? 'S' + e.key : e.key];
+  const cmd = st.settings.fkeys?.[e.shiftKey ? 'S' + e.key : e.key];
   if (!cmd) return;
   e.preventDefault();
   send(cmd);
-});
-
-// ----------------------------------------------------- panel de control
-const PANEL: [string, string, () => void][] = [
-  ['Ajustes generales', '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>', () => $('btn-settings').click()],
-  ['Redes y conexión', '<path d="M9 7V3M15 7V3M7 7h10v5a5 5 0 0 1-10 0zM12 17v4"/>', () => $('btn-connect').click()],
-  ['Sistema de ausencia', '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>', () => openAway()],
-  ['Teclas de función', '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>', () => openFkeys()],
-  ['Ignorados', '<circle cx="12" cy="12" r="8"/><path d="M6.5 6.5l11 11"/>', () => openIgnore()],
-  ['Scripts', '<path d="M8 6l-5 6 5 6M16 6l5 6-5 6M13 4l-2 16"/>', () => $('btn-scripts').click()],
-  ['Lista de canales', '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>', () => $('btn-list').click()],
-  ['Transferencias DCC', '<path d="M7 4v14M3 14l4 4 4-4M17 20V6M13 10l4-4 4 4"/>', () => $('btn-dcc').click()],
-  ['Registros', '<path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11"/>', () => $('btn-logs').click()],
-];
-function svgIcon(paths: string): SVGSVGElement {
-  // Los trazos son constantes definidas arriba, nunca texto del usuario.
-  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`, 'image/svg+xml');
-  return document.importNode(doc.documentElement, true) as unknown as SVGSVGElement;
-}
-$('btn-panel').addEventListener('click', () => {
-  const grid = $('panel-grid');
-  grid.replaceChildren();
-  for (const [label, icon, open] of PANEL) {
-    const b = el('button');
-    b.type = 'button';
-    b.append(svgIcon(icon), el('span', '', label));
-    b.addEventListener('click', () => {
-      dialog('dlg-panel').close();
-      open();
-    });
-    grid.append(b);
-  }
-  dialog('dlg-panel').showModal();
-});
-
-function openAway(): void {
-  const f = $<HTMLFormElement>('away-form');
-  (f.elements.namedItem('awayMessage') as HTMLInputElement).value = settings.awayMessage;
-  (f.elements.namedItem('awayAutoReply') as HTMLInputElement).checked = settings.awayAutoReply;
-  (f.elements.namedItem('awayNickSuffix') as HTMLInputElement).value = settings.awayNickSuffix;
-  dialog('dlg-away').showModal();
-}
-$('away-form').addEventListener('submit', () => {
-  const f = new FormData($<HTMLFormElement>('away-form'));
-  void window.onda.invoke('settings:update', {
-    awayMessage: String(f.get('awayMessage') ?? '').trim() || 'Ausente',
-    awayAutoReply: f.has('awayAutoReply'),
-    awayNickSuffix: String(f.get('awayNickSuffix') ?? '').replace(/\s/g, '').slice(0, 12),
-  } satisfies Partial<Settings>);
-});
-
-function openFkeys(): void {
-  const grid = $('fkeys-grid');
-  grid.replaceChildren();
-  for (let n = 1; n <= 12; n++) {
-    const label = el('label', '', `F${n}`);
-    const box = el('input');
-    box.name = `F${n}`;
-    box.value = settings.fkeys?.[`F${n}`] ?? '';
-    box.placeholder = n === 1 ? '/help' : '';
-    label.append(box);
-    grid.append(label);
-  }
-  dialog('dlg-fkeys').showModal();
-}
-$('fkeys-form').addEventListener('submit', () => {
-  const f = new FormData($<HTMLFormElement>('fkeys-form'));
-  const fkeys: Record<string, string> = {};
-  for (let n = 1; n <= 12; n++) {
-    const v = String(f.get(`F${n}`) ?? '').trim();
-    if (v) fkeys[`F${n}`] = v;
-  }
-  void window.onda.invoke('settings:update', { fkeys } satisfies Partial<Settings>);
-});
-
-function renderIgnore(): void {
-  const list = $('ignore-list');
-  list.replaceChildren();
-  if (!settings.ignore.length) list.append(el('div', 'empty', 'No ignoras a nadie.'));
-  for (const m of settings.ignore) {
-    const row = el('div', 'ign');
-    const rm = el('button', '', 'Quitar');
-    rm.type = 'button';
-    rm.addEventListener('click', async () => {
-      await window.onda.invoke('settings:update', { ignore: settings.ignore.filter((x) => x !== m) } satisfies Partial<Settings>);
-      renderIgnore();
-    });
-    row.append(el('span', '', m), rm);
-    list.append(row);
-  }
-}
-function openIgnore(): void {
-  renderIgnore();
-  dialog('dlg-ignore').showModal();
-}
-$('ignore-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const box = $<HTMLInputElement>('ignore-input');
-  const mask = box.value.trim().split(/\s+/)[0];
-  if (!mask) return;
-  if (!settings.ignore.includes(mask)) await window.onda.invoke('settings:update', { ignore: [...settings.ignore, mask] } satisfies Partial<Settings>);
-  box.value = '';
-  renderIgnore();
 });
 
 // Búsqueda en la conversación (Ctrl+F)
@@ -1779,87 +1110,14 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Lista de canales de la red
-const chanLists = new Map<string, ChannelListEntry[]>();
-let listSid = '';
-
-function renderChanList(): void {
-  const all = chanLists.get(listSid);
-  const out = $('list-results');
-  out.replaceChildren();
-  if (!all) {
-    $('list-status').textContent = 'Pidiendo la lista al servidor…';
-    return;
-  }
-  const q = $<HTMLInputElement>('list-filter').value.trim().toLowerCase();
-  const hits = q ? all.filter((c) => c.name.toLowerCase().includes(q) || c.topic.toLowerCase().includes(q)) : all;
-  $('list-status').textContent = `${hits.length} de ${all.length} canales${hits.length > 500 ? ' (se muestran los 500 con más usuarios)' : ''}. Pulsa uno para entrar.`;
-  for (const c of hits.slice(0, 500)) {
-    const row = el('button', 'chan-row');
-    row.type = 'button';
-    row.append(el('span', 'n', c.name), el('span', 'u', String(c.users)), el('span', 't', stripFormatting(c.topic)));
-    row.title = stripFormatting(c.topic);
-    row.addEventListener('click', () => {
-      void window.onda.invoke('input', listSid, STATUS, `/join ${c.name}`);
-      dialog('dlg-list').close();
-    });
-    out.append(row);
-  }
-}
-
-function requestChanList(): void {
-  chanLists.delete(listSid);
-  renderChanList();
-  void window.onda.invoke('input', listSid, STATUS, '/list');
-}
-
-$('btn-list').addEventListener('click', () => {
-  const s = sessions.get(active.sid);
-  if (!s || s.info.sid === LOCAL || s.info.state !== 'connected') {
-    send('/list'); // muestra el aviso de «No estás conectado» en la ventana activa
-    return;
-  }
-  listSid = s.info.sid;
-  dialog('dlg-list').showModal();
-  if (chanLists.has(listSid)) renderChanList();
-  else requestChanList();
-});
-$('list-refresh').addEventListener('click', requestChanList);
-$('list-filter').addEventListener('input', renderChanList);
-$('list-form').addEventListener('submit', (e) => e.preventDefault());
-
-// Transferencias y registros
-$('btn-dcc').addEventListener('click', () => {
-  renderDcc();
-  dialog('dlg-dcc').showModal();
-});
-$('btn-logs').addEventListener('click', () => {
-  dialog('dlg-logs').showModal();
-  $('logs-query').focus();
-});
-$('logs-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const q = $<HTMLInputElement>('logs-query').value.trim();
-  const out = $('logs-results');
-  out.replaceChildren();
-  if (!q) return;
-  const hits = await window.onda.invoke<{ network: string; buffer: string; line: string }[]>('logs:search', q);
-  if (!hits.length) out.append(el('div', 'empty', 'Sin resultados.'));
-  for (const h of hits) {
-    const row = el('div', 'hit');
-    row.append(el('span', 'where', `${h.network} / ${h.buffer}`), document.createTextNode(h.line));
-    out.append(row);
-  }
-});
-
 // ------------------------------------------------------------------ inicio
 
 async function start(): Promise<void> {
   const snap = await window.onda.invoke<Snapshot>('snapshot');
-  settings = snap.settings;
-  networks = snap.networks;
+  st.settings = snap.settings;
+  st.networks = snap.networks;
   applySettings();
-  const local = ensureSession({ sid: LOCAL, name: 'Onda', state: 'local', nick: settings.nick });
+  const local = ensureSession({ sid: LOCAL, name: 'Onda', state: 'local', nick: st.settings.nick });
   const welcome = newBuffer(STATUS, 'status');
   const now = Date.now();
   for (const text of [

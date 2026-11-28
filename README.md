@@ -14,6 +14,7 @@ y soporte para el IRC moderno. Hecho con Electron y TypeScript. «Onda IRC» es 
 - **Uso diario**: reconexión automática volviendo a los canales abiertos, detección de conexiones caídas, lista de ignorados (`/ignore`),
   avisos de amigos (`/notify`), comandos automáticos al conectar, lista de canales de la red («Canales» o `/list`) y búsqueda en la conversación (Ctrl+F).
 - **Registros** de conversación en texto plano, con buscador.
+- **Aspecto con relieve**: botones redondeados que se hunden al pulsarlos, campos de texto hundidos, sombras por capas en ventanas y diálogos, en los tres temas.
 - **Ventanas flotantes** como en mIRC, con aspecto moderno: cada canal, privado y estado es una ventana que se mueve, se redimensiona, se minimiza y se maximiza; se colocan en cascada o en mosaico. Barra de menús, barra de botones y barra de ventanas con avisos de no leídos.
 - **Menú de clic derecho**: copiar la selección, la línea o toda la conversación; copiar y abrir enlaces; copiar nicks y temas; cortar, copiar y pegar en las cajas de texto.
 - **Barras colocables**: la barra de ventanas va arriba, abajo, a la izquierda o a la derecha, y la de estado arriba o abajo (menú Ver, o clic derecho sobre la barra).
@@ -122,4 +123,11 @@ when the user starts or accepts a DCC transfer or chat, directly to the other pa
 - `src/core/irc` — protocolo, cliente y formato.
 - `src/core/msl` — intérprete de scripts mIRC.
 - `src/core/app.ts` — sesiones, comandos, DCC y registros (sin dependencias de Electron).
-- `src/main`, `src/renderer` — ventana e interfaz.
+- `src/main` — ventana de Electron y puente seguro con la interfaz.
+- `src/renderer` — interfaz:
+  - `app.ts`: ventanas flotantes, barras, entrada de texto y eventos.
+  - `state.ts`: estado compartido (sesiones, búferes, ajustes, ventana activa).
+  - `dialogs.ts`: conexión, ajustes, scripts, transferencias, panel de control, canales y registros.
+  - `script-dialogs.ts`: diálogos definidos por scripts.
+  - `menu.ts`, `format.ts`, `dom.ts`: menú contextual, formato de texto IRC y utilidades.
+  - `style.css`: temas y aspecto con relieve (variables al principio del archivo).

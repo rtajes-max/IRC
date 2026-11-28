@@ -1,6 +1,6 @@
 {
   "name": "onda-irc",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Cliente IRC de escritorio moderno con scripting compatible con mIRC",
   "private": true,
   "license": "MIT",
